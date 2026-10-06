@@ -47,8 +47,6 @@ endpoints report utilization; they do not consume quota. Disabled credentials ar
 ## Install
 
 ```bash
-pi install npm:pi-cliproxyapi-quota
-# or from git:
 pi install git:github.com/anthonymich01/pi-cliproxyapi-quota
 ```
 
