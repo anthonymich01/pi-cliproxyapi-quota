@@ -130,8 +130,6 @@ Google `retrieveUserQuotaSummary`）。这些端点只报告用量，不消耗�
 ### 安装
 
 ```bash
-pi install npm:pi-cliproxyapi-quota
-# 或从 git：
 pi install git:github.com/anthonymich01/pi-cliproxyapi-quota
 ```
 
