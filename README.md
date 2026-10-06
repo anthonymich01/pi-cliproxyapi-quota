@@ -22,7 +22,7 @@ account — see [Scope](#scope--limitations)).
 |---|---|
 | `/quota` | For each credential the proxy holds, show every quota window: used %, remaining %, reset countdown. |
 | `Ctrl+Shift+Q` | Same as `/quota`, but works **while the model is streaming** (it's a shortcut, not a queued command). |
-| footer `Quota[claude] 5h 64% left · 7d 95% left` | Remaining % for the provider of the **current model** (follows model switches; falls back to the first credential). Color-coded by quota availability and reset countdown urgency; auto‑refreshed at the start/end of each turn (throttled to 60s). |
+| footer `Quota[claude] 5h 64% left · 7d 95% left` | Remaining % for the provider of the **current model** (follows model switches; falls back to the first credential). Color-coded by quota availability and reset countdown urgency; auto-shown on startup and refreshed every 3 minutes (idle or prompting). |
 
 ### Color-Coded Quota & Countdown
 
@@ -108,7 +108,7 @@ MIT
 |---|---|
 | `/quota` | 对代理持有的每个凭证，显示其所有配额窗口：已用 %、剩余 %、重置倒计时。 |
 | `Ctrl+Shift+Q` | 同 `/quota`，但**模型正在输出时也能按**（快捷键，不会被排队）。 |
-| footer `Quota[claude] 5h 64% left · 7d 95% left` | 显示**当前模型**对应服务的剩余 %（随模型切换，取不到时回退到第一个凭证）；额度与倒计时带有色彩指示，每轮开始/结束自动刷新（60s 节流）。 |
+| footer `Quota[claude] 5h 64% left · 7d 95% left` | 显示**当前模型**对应服务的剩余 %（随模型切换，取不到时回退到第一个凭证）；额度与倒计时带有色彩指示，启动即显示并每 3 分钟自动刷新（空闲或对话中均生效）。 |
 
 ### 状态栏彩色高亮与重置倒计时
 

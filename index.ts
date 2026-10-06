@@ -828,15 +828,12 @@ function isPrimaryUiSession(ctx: ExtensionContext): boolean {
 }
 
 export default function (pi: ExtensionAPI): void {
-	// Switching models switches the footer to that provider's quota immediately.
-	pi.on("model_select", (_e, ctx) => {
-		lastFooterFetch = 0;
-		refreshFooterThrottled(ctx);
-	});
-
 	// ----- /quota -----
 	const QUOTA_KEY = "cliproxy-quota";
-	let lastFooterFetch = 0;
+	const REFRESH_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
+	let currentCtx: ExtensionContext | undefined;
+	let intervalTimer: ReturnType<typeof setInterval> | undefined;
+	let isFetching = false;
 
 	async function collectUsage(
 		now: number,
@@ -849,8 +846,10 @@ export default function (pi: ExtensionAPI): void {
 		return collectQuota(base, key, now, prefer, modelId);
 	}
 
-	// silent=true only refreshes the footer (used for auto-refresh during/after a turn).
+	// silent=true only refreshes the footer (used for background auto-refresh).
 	async function runQuota(ctx: ExtensionContext, silent = false): Promise<void> {
+		if (isFetching && silent) return;
+		isFetching = true;
 		if (!silent) ctx.ui.notify("Fetching quota…", "info");
 		try {
 			const { blocks, footer } = await collectUsage(
@@ -878,19 +877,42 @@ export default function (pi: ExtensionAPI): void {
 			} else {
 				ctx.ui.notify(`Failed to fetch quota: ${msg}`, "error");
 			}
+		} finally {
+			isFetching = false;
 		}
 	}
 
-	// Auto-refresh footer: first turn start + each turn end, throttled to 60s, silent.
-	function refreshFooterThrottled(ctx: ExtensionContext): void {
-		if (!isPrimaryUiSession(ctx)) return;
-		const now = Date.now();
-		if (now - lastFooterFetch < 60_000) return;
-		lastFooterFetch = now;
-		void runQuota(ctx, true);
+	function startRefreshInterval(ctx: ExtensionContext): void {
+		currentCtx = ctx;
+		if (intervalTimer) clearInterval(intervalTimer);
+		intervalTimer = setInterval(() => {
+			if (currentCtx && isPrimaryUiSession(currentCtx)) {
+				void runQuota(currentCtx, true);
+			}
+		}, REFRESH_INTERVAL_MS);
+		intervalTimer.unref?.();
 	}
-	pi.on("before_agent_start", (_e, ctx) => refreshFooterThrottled(ctx));
-	pi.on("agent_settled", (_e, ctx) => refreshFooterThrottled(ctx));
+
+	// Show quota automatically as soon as Pi opens, and run 3-minute interval
+	pi.on("session_start", (_e, ctx) => {
+		startRefreshInterval(ctx);
+		void runQuota(ctx, true);
+	});
+
+	// Switching models switches the footer to that provider's quota immediately
+	pi.on("model_select", (_e, ctx) => {
+		startRefreshInterval(ctx);
+		void runQuota(ctx, true);
+	});
+
+	// Cleanup on session shutdown
+	pi.on("session_shutdown", () => {
+		if (intervalTimer) {
+			clearInterval(intervalTimer);
+			intervalTimer = undefined;
+		}
+		currentCtx = undefined;
+	});
 
 	// Works while streaming: shortcut fetches and shows quota immediately.
 	pi.registerShortcut("ctrl+shift+q", {
