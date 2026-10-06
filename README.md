@@ -1,6 +1,5 @@
 # pi-cliproxyapi-quota
 
-[![npm version](https://img.shields.io/npm/v/pi-cliproxyapi-quota.svg)](https://www.npmjs.com/package/pi-cliproxyapi-quota)
 [![license](https://img.shields.io/npm/l/pi-cliproxyapi-quota.svg)](./LICENSE)
 
 **English** | [中文](#中文说明)
