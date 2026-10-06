@@ -571,6 +571,7 @@ export async function collectQuota(
 	now = Date.now(),
 	prefer?: string | null,
 	modelId?: string | null,
+	options?: { color?: boolean },
 ): Promise<{ blocks: string[]; footer: string }> {
 	const creds = await listCredentials(base, key);
 	const known = creds
@@ -628,26 +629,27 @@ export async function collectQuota(
 			? prefer
 			: activeByProvider.keys().next().value;
 
+	const useColor = options?.color ?? true;
 	let footer = "";
 	if (actualProvider) {
 		const activeItem = activeByProvider.get(actualProvider)!;
-		const hit = summaryFromWins(activeItem.wins, now, modelId);
+		const credCount = (byProvider.get(actualProvider) ?? []).length;
+		const providerCount = activeByProvider.size;
+		const accName = formatAccountName(activeItem.cred);
+
+		let labelTag = "";
+		if (credCount > 1) {
+			labelTag = providerCount > 1 || actualProvider !== prefer ? `[${actualProvider}:${accName}]` : `[${accName}]`;
+		} else if (providerCount > 1 || actualProvider !== prefer) {
+			labelTag = `[${actualProvider}]`;
+		}
+
+		const hit = summaryFromWins(activeItem.wins, now, modelId, { color: useColor, labelTag });
 		if (hit !== "Quota n/a") {
-			const credCount = (byProvider.get(actualProvider) ?? []).length;
-			const providerCount = activeByProvider.size;
-			const accName = formatAccountName(activeItem.cred);
-
-			let labelTag = "";
-			if (credCount > 1) {
-				labelTag = providerCount > 1 || actualProvider !== prefer ? `[${actualProvider}:${accName}]` : `[${accName}]`;
-			} else if (providerCount > 1 || actualProvider !== prefer) {
-				labelTag = `[${actualProvider}]`;
-			}
-
 			const d = new Date(now);
 			const stamp = `@${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-			const baseText = labelTag ? hit.replace("Quota ", `Quota${labelTag} `) : hit;
-			footer = `${baseText} ${stamp}`;
+			const stampStr = useColor ? `${ANSI_DIM} ${stamp}${ANSI_RESET_DIM}` : ` ${stamp}`;
+			footer = `${hit}${stampStr}`;
 		}
 	}
 
@@ -698,8 +700,55 @@ function shortTag(label: string): string {
 	return label.split(/[ ·(]/)[0];
 }
 
+// ---------- color styling ----------
+
+export const ANSI_DIM = "\x1b[2m";
+export const ANSI_RESET_DIM = "\x1b[22m";
+export const ANSI_GREEN = "\x1b[32m";
+export const ANSI_YELLOW = "\x1b[33m";
+export const ANSI_ORANGE = "\x1b[38;5;208m";
+export const ANSI_RED = "\x1b[31m";
+export const ANSI_RESET_FG = "\x1b[39m";
+
+/**
+ * 4-tier remaining percentage coloring:
+ * > 75%  -> Green
+ * > 50%  -> Yellow
+ * > 25%  -> Orange
+ * <= 25% -> Red
+ */
+export function getQuotaColor(pct: number): string {
+	if (pct > 75) return ANSI_GREEN;
+	if (pct > 50) return ANSI_YELLOW;
+	if (pct > 25) return ANSI_ORANGE;
+	return ANSI_RED;
+}
+
+/**
+ * Dynamic reset countdown coloring:
+ * - Under 1 hour (< 1h) -> Green (both 5h and 7d limits)
+ * - Under 3 days (< 3d) -> Yellow (for 7d weekly limits)
+ * - Otherwise           -> null (default text color)
+ */
+export function getResetColor(
+	tag: string,
+	iso: string | null,
+	now = Date.now(),
+): string | null {
+	if (!iso) return null;
+	const t = Date.parse(iso);
+	if (Number.isNaN(t) || t <= now) return null;
+	const ms = t - now;
+	const ONE_HOUR = 60 * 60 * 1000;
+	const THREE_DAYS = 3 * 24 * 60 * 60 * 1000;
+	if (ms < ONE_HOUR) return ANSI_GREEN;
+	const isWeekly = tag.toLowerCase().includes("7d") || tag.toLowerCase().includes("week");
+	if (isWeekly && ms < THREE_DAYS) return ANSI_YELLOW;
+	return null;
+}
+
 /** Compact relative reset for the footer: " ↻ 1h44m", " ↻ 2d21h" ("" when unknown). */
-function compactReset(iso: string | null, now: number): string {
+export function compactReset(iso: string | null, now: number): string {
 	if (!iso) return "";
 	const t = Date.parse(iso);
 	if (Number.isNaN(t) || t <= now) return "";
@@ -720,8 +769,20 @@ function windowOrder(label: string): number {
 	return 4;
 }
 
+export interface SummaryOptions {
+	color?: boolean;
+	labelTag?: string;
+}
+
 /** Compact one-line summary for the footer (first two windows). */
-export function summaryFromWins(wins: Win[], now = Date.now(), modelId?: string | null): string {
+export function summaryFromWins(
+	wins: Win[],
+	now = Date.now(),
+	modelId?: string | null,
+	options?: SummaryOptions,
+): string {
+	const color = options?.color ?? false;
+	const labelTag = options?.labelTag ?? "";
 	const relevant = filterWinsForModel(wins, modelId)
 		.slice()
 		.sort((a, b) => windowOrder(a.label) - windowOrder(b.label));
@@ -729,10 +790,35 @@ export function summaryFromWins(wins: Win[], now = Date.now(), modelId?: string 
 	for (const w of relevant.slice(0, 2)) {
 		if (w.remainingPct === null) continue;
 		const rounded = Math.round(w.remainingPct);
-		const reset = rounded >= 100 ? "" : compactReset(w.resetIso, now);
-		parts.push(`${shortTag(w.label)} ${rounded}% left${reset}`);
+		const tag = shortTag(w.label);
+		const tagText = color ? `${ANSI_DIM}${tag} ${ANSI_RESET_DIM}` : `${tag} `;
+		const pctText = color
+			? `${getQuotaColor(rounded)}${rounded}% left${ANSI_RESET_FG}`
+			: `${rounded}% left`;
+		let resetText = "";
+		if (rounded < 100 && w.resetIso) {
+			const cReset = compactReset(w.resetIso, now);
+			if (cReset) {
+				if (color) {
+					const rColor = getResetColor(tag, w.resetIso, now);
+					if (rColor) {
+						resetText = ` ${rColor}${cReset.trim()}${ANSI_RESET_FG}`;
+					} else {
+						resetText = `${ANSI_DIM}${cReset}${ANSI_RESET_DIM}`;
+					}
+				} else {
+					resetText = cReset;
+				}
+			}
+		}
+		parts.push(`${tagText}${pctText}${resetText}`);
 	}
-	return parts.length ? `Quota ${parts.join(" · ")}` : "Quota n/a";
+	if (!parts.length) return "Quota n/a";
+	const prefix = color
+		? `${ANSI_DIM}Quota${labelTag} ${ANSI_RESET_DIM}`
+		: `Quota${labelTag} `;
+	const sep = color ? `${ANSI_DIM} · ${ANSI_RESET_DIM}` : " · ";
+	return `${prefix}${parts.join(sep)}`;
 }
 
 // ---------- extension ----------
@@ -774,7 +860,7 @@ export default function (pi: ExtensionAPI): void {
 			);
 			if (!silent) ctx.ui.notify(`Subscription quota\n${blocks.join("\n")}`, "info");
 			if (footer && isPrimaryUiSession(ctx)) {
-				ctx.ui.setStatus(QUOTA_KEY, ctx.ui.theme.fg("dim", footer));
+				ctx.ui.setStatus(QUOTA_KEY, footer);
 			}
 		} catch (err) {
 			if (silent) return;

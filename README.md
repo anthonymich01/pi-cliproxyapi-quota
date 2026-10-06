@@ -22,7 +22,22 @@ account — see [Scope](#scope--limitations)).
 |---|---|
 | `/quota` | For each credential the proxy holds, show every quota window: used %, remaining %, reset countdown. |
 | `Ctrl+Shift+Q` | Same as `/quota`, but works **while the model is streaming** (it's a shortcut, not a queued command). |
-| footer `Quota[claude] 5h 64% left · 7d 95% left` | Remaining % for the provider of the **current model** (follows model switches; falls back to the first credential). Auto‑refreshed at the start/end of each turn (throttled to 60s). |
+| footer `Quota[claude] 5h 64% left · 7d 95% left` | Remaining % for the provider of the **current model** (follows model switches; falls back to the first credential). Color-coded by quota availability and reset countdown urgency; auto‑refreshed at the start/end of each turn (throttled to 60s). |
+
+### Color-Coded Quota & Countdown
+
+The status bar footer features dynamic ANSI colors so you can immediately see quota availability and reset countdown urgency:
+
+- **Remaining Percentage (`% left`)**:
+  - 🟢 **Green** (`> 75%` left): Quota is ample.
+  - 🟡 **Yellow** (`51%–75%` left): Moderate consumption.
+  - 🟠 **Orange** (`26%–50%` left): Running lower.
+  - 🔴 **Red** (`≤ 25%` left): Low or exhausted quota.
+
+- **Reset Countdown (`↻`)**:
+  - 🟢 **Green** (`< 1 hour` remaining, e.g. `↻ 59m`, `↻ 45m`): Limit resets very soon (applies to both 5-hour session and 7-day weekly windows).
+  - 🟡 **Yellow** (`< 3 days` remaining, e.g. `↻ 2d1h`, `↻ 1d1h`): For 7-day weekly windows approaching reset.
+  - **Default / Dim** (e.g. `↻ 2h1m`, `↻ 5d18h`): Reset is still further out (`≥ 1 hour` for 5h windows, `≥ 3 days` for 7d windows).
 
 The quota data path mirrors the EasyCLIProxyAPI control panel exactly: the proxy management API
 `POST /v0/management/api-call` proxies each provider's own usage endpoint (e.g. Anthropic
@@ -34,7 +49,7 @@ endpoints report utilization; they do not consume quota. Disabled credentials ar
 ```bash
 pi install npm:pi-cliproxyapi-quota
 # or from git:
-pi install git:github.com/songhuiming2007-coder/pi-cliproxyapi-quota
+pi install git:github.com/anthonymich01/pi-cliproxyapi-quota
 ```
 
 Or load a local checkout by adding its path to `~/.pi/agent/settings.json`:
@@ -93,7 +108,22 @@ MIT
 |---|---|
 | `/quota` | 对代理持有的每个凭证，显示其所有配额窗口：已用 %、剩余 %、重置倒计时。 |
 | `Ctrl+Shift+Q` | 同 `/quota`，但**模型正在输出时也能按**（快捷键，不会被排队）。 |
-| footer `Quota[claude] 5h 64% left · 7d 95% left` | 显示**当前模型**对应服务的剩余 %（随模型切换，取不到时回退到第一个凭证）；每轮开始/结束自动刷新（60s 节流）。 |
+| footer `Quota[claude] 5h 64% left · 7d 95% left` | 显示**当前模型**对应服务的剩余 %（随模型切换，取不到时回退到第一个凭证）；额度与倒计时带有色彩指示，每轮开始/结束自动刷新（60s 节流）。 |
+
+### 状态栏彩色高亮与重置倒计时
+
+底部状态栏配额采用动态 ANSI 彩色高亮显示，一眼看清额度裕量与重置紧迫程度：
+
+- **剩余百分比 (`% left`)**:
+  - 🟢 **绿色** (`> 75%` 剩余): 额度充裕。
+  - 🟡 **黄色** (`51%–75%` 剩余): 消耗适中。
+  - 🟠 **橙色** (`26%–50%` 剩余): 额度偏低。
+  - 🔴 **红色** (`≤ 25%` 剩余): 额度告急。
+
+- **重置倒计时 (`↻`)**:
+  - 🟢 **绿色** (`< 1 小时`，例如 `↻ 59m`、`↻ 45m`): 即将重置刷新（适用于 5 小时会话和 7 天周额度）。
+  - 🟡 **黄色** (`< 3 天`，例如 `↻ 2d1h`、`↻ 1d1h`): 适用于 7 天周配额窗口临近重置。
+  - **默认暗淡**（例如 `↻ 2h1m`、`↻ 5d18h`）: 距离重置尚早（5 小时窗口 `≥ 1 小时`，7 天窗口 `≥ 3 天`）。
 
 取数链路与 EasyCLIProxyAPI 控制面板完全一致：代理管理 API `POST /v0/management/api-call`
 用存储的 OAuth 凭证代理请求各提供方自己的用量端点（如 Anthropic `/api/oauth/usage`、
@@ -104,7 +134,7 @@ Google `retrieveUserQuotaSummary`）。这些端点只报告用量，不消耗�
 ```bash
 pi install npm:pi-cliproxyapi-quota
 # 或从 git：
-pi install git:github.com/songhuiming2007-coder/pi-cliproxyapi-quota
+pi install git:github.com/anthonymich01/pi-cliproxyapi-quota
 ```
 
 或把本地目录的路径加到 `~/.pi/agent/settings.json`：
