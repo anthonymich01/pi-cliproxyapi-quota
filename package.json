@@ -1,6 +1,6 @@
 {
   "name": "pi-cliproxyapi-quota",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Pi extension: view subscription quota for every OAuth provider CLIProxyAPI holds (Claude, Antigravity/Gemini, Codex, Kimi, xAI) inside pi.",
   "type": "module",
   "keywords": [
@@ -14,11 +14,11 @@
   "author": "songhuiming",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/songhuiming2007-coder/pi-cliproxyapi-quota.git"
+    "url": "git+https://github.com/anthonymich01/pi-cliproxyapi-quota.git"
   },
-  "homepage": "https://github.com/songhuiming2007-coder/pi-cliproxyapi-quota#readme",
+  "homepage": "https://github.com/anthonymich01/pi-cliproxyapi-quota#readme",
   "bugs": {
-    "url": "https://github.com/songhuiming2007-coder/pi-cliproxyapi-quota/issues"
+    "url": "https://github.com/anthonymich01/pi-cliproxyapi-quota/issues"
   },
   "engines": {
     "node": ">=22.19.0"

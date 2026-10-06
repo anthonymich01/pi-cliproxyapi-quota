@@ -82,7 +82,23 @@ export function resolveManagementKey(): string | undefined {
 
 // ---------- management API ----------
 
-interface AuthFile {
+export interface AuthCooldown {
+	scope?: string;
+	model_key?: string;
+	reason?: string;
+	retry_at?: string;
+	remaining_seconds?: number;
+	backoff_level?: number;
+	http_status?: number;
+}
+
+export interface RecentRequest {
+	time?: string;
+	success?: number;
+	failed?: number;
+}
+
+export interface AuthFile {
 	id: string;
 	name: string;
 	provider?: string;
@@ -92,6 +108,16 @@ interface AuthFile {
 	email?: string;
 	label?: string;
 	project_id?: string;
+	account?: string;
+	status?: string;
+	unavailable?: boolean;
+	priority?: number;
+	last_refresh?: string;
+	updated_at?: string;
+	success?: number;
+	failed?: number;
+	cooldowns?: AuthCooldown[];
+	recent_requests?: RecentRequest[];
 }
 
 async function mgmtGet<T>(base: string, key: string, path: string): Promise<T> {
@@ -393,50 +419,238 @@ export function providerFromModel(model: { provider?: string; id?: string } | un
 	return null;
 }
 
+export function isCredentialAvailable(c: AuthFile): boolean {
+	if (c.disabled || c.unavailable) return false;
+	if (c.status && c.status !== "active") return false;
+	return true;
+}
+
+export function isCredentialOnCooldown(c: AuthFile, modelId?: string | null, now = Date.now()): boolean {
+	if (!c.cooldowns || !Array.isArray(c.cooldowns) || c.cooldowns.length === 0) return false;
+	for (const cd of c.cooldowns) {
+		const isTimeActive =
+			(typeof cd.remaining_seconds === "number" && cd.remaining_seconds > 0) ||
+			(typeof cd.retry_at === "string" && !Number.isNaN(Date.parse(cd.retry_at)) && Date.parse(cd.retry_at) > now);
+		if (!isTimeActive) continue;
+		if (!cd.scope || cd.scope !== "model") {
+			return true;
+		}
+		if (cd.scope === "model" && cd.model_key) {
+			if (!modelId) return true;
+			const mk = cd.model_key.toLowerCase().replace(/_/g, "-");
+			const mid = modelId.toLowerCase().replace(/_/g, "-");
+			if (mk === mid || mid.includes(mk) || mk.includes(mid)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+export function getRecentActivityScore(c: AuthFile): number {
+	let score = 0;
+	if (Array.isArray(c.recent_requests)) {
+		const len = c.recent_requests.length;
+		for (let i = 0; i < len; i++) {
+			const req = c.recent_requests[i];
+			if (req?.success && typeof req.success === "number") {
+				const weight = i + 1;
+				score += req.success * weight;
+			}
+		}
+	}
+	return score;
+}
+
+export function getLastActiveTime(c: AuthFile): number {
+	if (typeof c.updated_at === "string") {
+		const t = Date.parse(c.updated_at);
+		if (!Number.isNaN(t)) return t;
+	}
+	if (typeof c.last_refresh === "string") {
+		const t = Date.parse(c.last_refresh);
+		if (!Number.isNaN(t)) return t;
+	}
+	return 0;
+}
+
+export function filterWinsForModel(wins: Win[], modelId?: string | null): Win[] {
+	if (wins.length === 0) return wins;
+	const mid = (modelId ?? "").toLowerCase();
+	const hasGeminiGroup = wins.some((w) => w.label.toLowerCase().includes("gemini"));
+	const hasClaudeGroup = wins.some(
+		(w) => w.label.toLowerCase().includes("claude") || w.label.toLowerCase().includes("gpt"),
+	);
+	if (hasGeminiGroup && hasClaudeGroup) {
+		if (mid.includes("gemini")) {
+			const geminiWins = wins.filter((w) => w.label.toLowerCase().includes("gemini"));
+			if (geminiWins.length > 0) return geminiWins;
+		} else if (mid.includes("claude") || mid.includes("gpt") || mid.includes("codex")) {
+			const nonGeminiWins = wins.filter(
+				(w) => w.label.toLowerCase().includes("claude") || w.label.toLowerCase().includes("gpt"),
+			);
+			if (nonGeminiWins.length > 0) return nonGeminiWins;
+		} else {
+			// If no specific model or unknown, don't mix groups: pick the primary group of the credential
+			const geminiWins = wins.filter((w) => w.label.toLowerCase().includes("gemini"));
+			if (geminiWins.length > 0) return geminiWins;
+		}
+	}
+	return wins;
+}
+
+export function hasRemainingQuota(wins: Win[], modelId?: string | null): boolean {
+	const relevant = filterWinsForModel(wins, modelId);
+	if (relevant.length === 0) return true;
+	const allZero = relevant.every((w) => w.remainingPct !== null && w.remainingPct <= 0);
+	return !allZero;
+}
+
+export function getMinRemainingPct(wins: Win[], modelId?: string | null): number {
+	const relevant = filterWinsForModel(wins, modelId);
+	let min = 100;
+	for (const w of relevant) {
+		if (w.remainingPct !== null && w.remainingPct < min) {
+			min = w.remainingPct;
+		}
+	}
+	return min;
+}
+
+export function formatAccountName(c: AuthFile): string {
+	const raw = c.email || c.label || c.name || "";
+	if (raw.includes("@")) {
+		return raw.split("@")[0]!;
+	}
+	return raw.replace(/\.json$/, "");
+}
+
+export function compareCredentials(
+	a: { cred: AuthFile; wins: Win[] },
+	b: { cred: AuthFile; wins: Win[] },
+	modelId?: string | null,
+	now = Date.now(),
+): number {
+	const aAvail = isCredentialAvailable(a.cred);
+	const bAvail = isCredentialAvailable(b.cred);
+	if (aAvail !== bAvail) return aAvail ? -1 : 1;
+
+	const aCool = isCredentialOnCooldown(a.cred, modelId, now);
+	const bCool = isCredentialOnCooldown(b.cred, modelId, now);
+	if (aCool !== bCool) return aCool ? 1 : -1;
+
+	const aHasQuota = hasRemainingQuota(a.wins, modelId);
+	const bHasQuota = hasRemainingQuota(b.wins, modelId);
+	if (aHasQuota !== bHasQuota) return aHasQuota ? -1 : 1;
+
+	const aAct = getRecentActivityScore(a.cred);
+	const bAct = getRecentActivityScore(b.cred);
+	if (aAct !== bAct) return bAct - aAct;
+
+	const aTime = getLastActiveTime(a.cred);
+	const bTime = getLastActiveTime(b.cred);
+	if (Math.abs(bTime - aTime) > 60_000) return bTime - aTime;
+
+	const aPct = getMinRemainingPct(a.wins, modelId);
+	const bPct = getMinRemainingPct(b.wins, modelId);
+	if (aPct !== bPct) return bPct - aPct;
+
+	const aPri = a.cred.priority ?? 0;
+	const bPri = b.cred.priority ?? 0;
+	if (aPri !== bPri) return bPri - aPri;
+
+	const aSucc = a.cred.success ?? 0;
+	const bSucc = b.cred.success ?? 0;
+	return bSucc - aSucc;
+}
+
 /** Fetch and render quota for every known credential. Exported for test-quota.mjs. */
 export async function collectQuota(
 	base: string,
 	key: string,
 	now = Date.now(),
 	prefer?: string | null,
+	modelId?: string | null,
 ): Promise<{ blocks: string[]; footer: string }> {
 	const creds = await listCredentials(base, key);
 	const known = creds
 		.filter((c) => ADAPTERS[providerKey(c)])
 		.sort((a, b) => (providerKey(a) === "claude" ? 0 : 1) - (providerKey(b) === "claude" ? 0 : 1));
 	if (known.length === 0) throw new Error("NO_CRED");
-	const blocks: string[] = [];
-	const summaries = new Map<string, string>(); // providerKey -> one-line summary
+
+	type CredResult = { cred: AuthFile; pk: string; wins: Win[]; error?: Error };
+	const results: CredResult[] = [];
 	for (const c of known) {
 		const pk = providerKey(c);
 		const adapter = ADAPTERS[pk];
-		const who = c.email || c.label || c.name;
-		const tag = adapter.verified ? "" : " (unverified)";
 		try {
 			const wins = await adapter.fetch(base, key, c);
-			blocks.push(`● ${who} [${pk}]${tag}`);
-			blocks.push(...renderWindows(wins, now));
-			const s = summaryFromWins(wins);
-			if (s !== "Quota n/a" && !summaries.has(pk)) summaries.set(pk, s);
+			results.push({ cred: c, pk, wins });
 		} catch (err) {
-			blocks.push(`● ${who} [${pk}]${tag}\n  failed: ${(err as Error).message}`);
+			results.push({ cred: c, pk, wins: [], error: err as Error });
 		}
 	}
+
+	// Group successful results by provider and determine the active credential for each provider
+	const byProvider = new Map<string, Array<{ cred: AuthFile; wins: Win[] }>>();
+	for (const r of results) {
+		if (r.error) continue;
+		const list = byProvider.get(r.pk) ?? [];
+		list.push({ cred: r.cred, wins: r.wins });
+		byProvider.set(r.pk, list);
+	}
+
+	const activeByProvider = new Map<string, { cred: AuthFile; wins: Win[] }>();
+	for (const [pk, list] of byProvider) {
+		list.sort((a, b) => compareCredentials(a, b, modelId, now));
+		activeByProvider.set(pk, list[0]!);
+	}
+
+	const blocks: string[] = [];
+	for (const r of results) {
+		const adapter = ADAPTERS[r.pk];
+		const who = r.cred.email || r.cred.label || r.cred.name;
+		const tag = adapter.verified ? "" : " (unverified)";
+		const onCooldown = isCredentialOnCooldown(r.cred, modelId, now);
+		const isActive = activeByProvider.get(r.pk)?.cred.id === r.cred.id;
+		const statusNote = onCooldown ? " [cooling down]" : isActive ? " [active]" : "";
+		if (r.error) {
+			blocks.push(`● ${who} [${r.pk}]${tag}${statusNote}\n  failed: ${r.error.message}`);
+		} else {
+			blocks.push(`● ${who} [${r.pk}]${tag}${statusNote}`);
+			blocks.push(...renderWindows(r.wins, now));
+		}
+	}
+
 	// Footer follows the current model's provider; fall back to the first available.
-	// Tag the provider whenever it is not the current model's (or when several exist),
-	// so a fallback never masquerades as the active provider's quota.
-	const actual = prefer && summaries.has(prefer) ? prefer : [...summaries.keys()][0];
-	const hit = actual !== undefined ? summaries.get(actual) : undefined;
-	// Stamp the fetch time so a stale/frozen footer is visibly distinguishable
-	// from live data that simply hasn't moved.
-	const d = new Date(now);
-	const stamp = `@${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-	const footer =
-		hit && actual
-			? (summaries.size > 1 || actual !== prefer
-				? hit.replace("Quota ", `Quota[${actual}] `)
-				: hit) + ` ${stamp}`
-			: "";
+	const actualProvider =
+		prefer && activeByProvider.has(prefer)
+			? prefer
+			: activeByProvider.keys().next().value;
+
+	let footer = "";
+	if (actualProvider) {
+		const activeItem = activeByProvider.get(actualProvider)!;
+		const hit = summaryFromWins(activeItem.wins, now, modelId);
+		if (hit !== "Quota n/a") {
+			const credCount = (byProvider.get(actualProvider) ?? []).length;
+			const providerCount = activeByProvider.size;
+			const accName = formatAccountName(activeItem.cred);
+
+			let labelTag = "";
+			if (credCount > 1) {
+				labelTag = providerCount > 1 || actualProvider !== prefer ? `[${actualProvider}:${accName}]` : `[${accName}]`;
+			} else if (providerCount > 1 || actualProvider !== prefer) {
+				labelTag = `[${actualProvider}]`;
+			}
+
+			const d = new Date(now);
+			const stamp = `@${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+			const baseText = labelTag ? hit.replace("Quota ", `Quota${labelTag} `) : hit;
+			footer = `${baseText} ${stamp}`;
+		}
+	}
+
 	return { blocks, footer };
 }
 
@@ -468,12 +682,12 @@ export function renderWindows(wins: Win[], now = Date.now()): string[] {
 	if (wins.length === 0) return ["  (no quota window data)"];
 	return wins.map((w) => {
 		const remain = w.remainingPct;
-		if (remain === null) return `  ${w.label.padEnd(22)} n/a · ${formatReset(w.resetIso, now)}`;
+		if (remain === null) return `  ${w.label.padEnd(30)} n/a · ${formatReset(w.resetIso, now)}`;
 		const used = Math.max(0, 100 - remain);
 		// suppress when the displayed value rounds to 100%: upstream slides resetTime
 		// on untouched buckets (always now+window), so a countdown there is an illusion.
 		const resetStr = Math.round(remain) >= 100 ? "—" : formatReset(w.resetIso, now);
-		return `  ${w.label.padEnd(22)} ${bar(used)} ${used.toFixed(0)}% used · ${remain.toFixed(0)}% left · ${resetStr}`;
+		return `  ${w.label.padEnd(30)} ${bar(used)} ${used.toFixed(0)}% used · ${remain.toFixed(0)}% left · ${resetStr}`;
 	});
 }
 
@@ -484,7 +698,7 @@ function shortTag(label: string): string {
 	return label.split(/[ ·(]/)[0];
 }
 
-/** Compact relative reset for the footer: " ↻1h44m", " ↻2d21h" ("" when unknown). */
+/** Compact relative reset for the footer: " ↻ 1h44m", " ↻ 2d21h" ("" when unknown). */
 function compactReset(iso: string | null, now: number): string {
 	if (!iso) return "";
 	const t = Date.parse(iso);
@@ -493,15 +707,26 @@ function compactReset(iso: string | null, now: number): string {
 	const d = Math.floor(ms / 86_400_000);
 	const h = Math.floor((ms % 86_400_000) / 3_600_000);
 	const m = Math.floor((ms % 3_600_000) / 60_000);
-	if (d > 0) return ` ↻${d}d${h}h`;
-	if (h > 0) return ` ↻${h}h${m}m`;
-	return ` ↻${m}m`;
+	if (d > 0) return ` ↻ ${d}d${h}h`;
+	if (h > 0) return ` ↻ ${h}h${m}m`;
+	return ` ↻ ${m}m`;
+}
+
+function windowOrder(label: string): number {
+	const l = label.toLowerCase();
+	if (l.includes("5h") || l.includes("5-hour") || l.includes("five")) return 1;
+	if (l.includes("daily") || l.includes("24h") || l.includes("1d")) return 2;
+	if (l.includes("weekly") || l.includes("7-day") || l.includes("7d") || l.includes("week")) return 3;
+	return 4;
 }
 
 /** Compact one-line summary for the footer (first two windows). */
-export function summaryFromWins(wins: Win[], now = Date.now()): string {
+export function summaryFromWins(wins: Win[], now = Date.now(), modelId?: string | null): string {
+	const relevant = filterWinsForModel(wins, modelId)
+		.slice()
+		.sort((a, b) => windowOrder(a.label) - windowOrder(b.label));
 	const parts: string[] = [];
-	for (const w of wins.slice(0, 2)) {
+	for (const w of relevant.slice(0, 2)) {
 		if (w.remainingPct === null) continue;
 		const rounded = Math.round(w.remainingPct);
 		const reset = rounded >= 100 ? "" : compactReset(w.resetIso, now);
@@ -527,18 +752,26 @@ export default function (pi: ExtensionAPI): void {
 	const QUOTA_KEY = "cliproxy-quota";
 	let lastFooterFetch = 0;
 
-	async function collectUsage(now: number, prefer?: string | null): Promise<{ blocks: string[]; footer: string }> {
+	async function collectUsage(
+		now: number,
+		prefer?: string | null,
+		modelId?: string | null,
+	): Promise<{ blocks: string[]; footer: string }> {
 		const base = resolveBaseUrl();
 		const key = resolveManagementKey();
 		if (!key) throw new Error("NO_KEY");
-		return collectQuota(base, key, now, prefer);
+		return collectQuota(base, key, now, prefer, modelId);
 	}
 
 	// silent=true only refreshes the footer (used for auto-refresh during/after a turn).
 	async function runQuota(ctx: ExtensionContext, silent = false): Promise<void> {
 		if (!silent) ctx.ui.notify("Fetching quota…", "info");
 		try {
-			const { blocks, footer } = await collectUsage(Date.now(), providerFromModel(ctx.model));
+			const { blocks, footer } = await collectUsage(
+				Date.now(),
+				providerFromModel(ctx.model),
+				ctx.model?.id,
+			);
 			if (!silent) ctx.ui.notify(`Subscription quota\n${blocks.join("\n")}`, "info");
 			if (footer && isPrimaryUiSession(ctx)) {
 				ctx.ui.setStatus(QUOTA_KEY, ctx.ui.theme.fg("dim", footer));
