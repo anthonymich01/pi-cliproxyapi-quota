@@ -275,6 +275,100 @@ export function mergeWins(existingWins: Win[], newWins: Win[]): Win[] {
 	return order.map((label) => map.get(label)!);
 }
 
+export function parseModelsQuota(body: string, now = Date.now()): Win[] {
+	let data: Record<string, unknown>;
+	try {
+		data = JSON.parse(body) as Record<string, unknown>;
+	} catch {
+		return [];
+	}
+	if (!data || typeof data !== "object") return [];
+
+	const rawModels = data.models;
+	const entries: Array<{ id: string; quotaInfo?: Record<string, unknown> }> = [];
+
+	if (Array.isArray(rawModels)) {
+		for (const m of rawModels) {
+			if (m && typeof m === "object") {
+				const id = String(
+					(m as { id?: unknown; name?: unknown; modelId?: unknown }).id ??
+						(m as { id?: unknown; name?: unknown; modelId?: unknown }).name ??
+						(m as { id?: unknown; name?: unknown; modelId?: unknown }).modelId ??
+						"",
+				);
+				entries.push({ id, quotaInfo: (m as { quotaInfo?: Record<string, unknown> }).quotaInfo });
+			}
+		}
+	} else if (rawModels && typeof rawModels === "object") {
+		for (const [id, m] of Object.entries(rawModels)) {
+			if (m && typeof m === "object") {
+				entries.push({
+					id,
+					quotaInfo: (m as Record<string, unknown>).quotaInfo as Record<string, unknown> | undefined,
+				});
+			}
+		}
+	}
+
+	const agg = new Map<string, Win>();
+
+	for (const { id, quotaInfo } of entries) {
+		if (!quotaInfo || typeof quotaInfo !== "object") continue;
+
+		const mid = id.toLowerCase();
+		let group: string;
+		if (mid.includes("argon")) {
+			group = "Argon Models";
+		} else if (mid.includes("claude") || mid.includes("gpt")) {
+			group = "Claude and GPT models";
+		} else if (mid.includes("gemini")) {
+			group = "Gemini Models";
+		} else {
+			continue;
+		}
+
+		const resetTimeRaw = quotaInfo.resetTime;
+		const resetIso = typeof resetTimeRaw === "string" && resetTimeRaw.trim() ? resetTimeRaw.trim() : null;
+
+		let frac = toNum(quotaInfo.remainingFraction);
+		if (frac === null) {
+			if (resetIso) {
+				frac = 0;
+			} else {
+				continue;
+			}
+		}
+
+		if (!resetIso) continue;
+		const resetMs = Date.parse(resetIso);
+		if (Number.isNaN(resetMs)) continue;
+
+		const tag = resetMs - now <= 6 * 3600 * 1000 ? "5h" : "weekly";
+		const label = `${group} · ${tag}`;
+		const remainingPct = Math.max(0, Math.min(100, frac * 100));
+
+		const existing = agg.get(label);
+		if (!existing) {
+			agg.set(label, { label, remainingPct, resetIso });
+		} else {
+			if (existing.remainingPct === null || remainingPct < existing.remainingPct) {
+				agg.set(label, { label, remainingPct, resetIso });
+			} else if (remainingPct === existing.remainingPct) {
+				if (!existing.resetIso && resetIso) {
+					agg.set(label, { label, remainingPct, resetIso });
+				} else if (existing.resetIso && resetIso) {
+					const tExist = Date.parse(existing.resetIso);
+					if (resetMs < tExist) {
+						agg.set(label, { label, remainingPct, resetIso });
+					}
+				}
+			}
+		}
+	}
+
+	return Array.from(agg.values());
+}
+
 function parseQuotaSummary(body: string): Win[] {
 	const data = JSON.parse(body) as {
 		groups?: Array<{ displayName?: unknown; buckets?: Array<Record<string, unknown>> }>;
@@ -333,6 +427,23 @@ const antigravityAdapter: Adapter = {
 					body: JSON.stringify(payload),
 				});
 				const wins = parseQuotaSummary(body);
+				mergedWins = mergeWins(mergedWins, wins);
+				successCount++;
+			} catch (err) {
+				lastErr = err;
+			}
+		}
+
+		for (const host of ANTIGRAVITY_HOSTS) {
+			try {
+				const body = await proxyCall(base, key, {
+					authIndex,
+					method: "POST",
+					url: `${host}/v1internal:fetchAvailableModels`,
+					header,
+					body: JSON.stringify(payload),
+				});
+				const wins = parseModelsQuota(body);
 				mergedWins = mergeWins(mergedWins, wins);
 				successCount++;
 			} catch (err) {

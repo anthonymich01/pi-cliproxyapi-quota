@@ -2,6 +2,11 @@
 
 All notable changes to `pi-cliproxyapi-quota` will be documented in this file.
 
+## [0.3.4] - 2026-10-16
+
+### Fixed
+- Fixed Antigravity Gemini 5-hour quota showing 100% left: query `POST /v1internal:fetchAvailableModels` across CloudCode endpoints to retrieve live per-model quota (`quotaInfo.remainingFraction` and `quotaInfo.resetTime`) and merge the most restrictive window and active reset countdown into the quota summary.
+
 ## [0.3.3] - 2026-10-16
 
 ### Added

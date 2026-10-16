@@ -9,6 +9,7 @@ import {
 	filterWinsForModel,
 	providerFromModel,
 	mergeWins,
+	parseModelsQuota,
 	formatReset,
 	compactReset,
 	getQuotaColor,
@@ -179,6 +180,124 @@ console.assert(
 console.assert(
 	merged.find((w) => w.label === "Claude and GPT models · weekly")?.remainingPct === 80,
 	"mergeWins keeps most restrictive remainingPct",
+);
+
+// parseModelsQuota unit checks
+const mockNow = Date.parse("2026-10-16T12:00:00Z");
+const reset4h = new Date(mockNow + 4 * 3600 * 1000).toISOString();
+const reset5d = new Date(mockNow + 5 * 86400 * 1000).toISOString();
+
+const mockModelsPayload = {
+	models: {
+		"gemini-3.8-flash-tiered": {
+			displayName: "Gemini 3.8 Flash Tiered",
+			quotaInfo: {
+				remainingFraction: 0.72,
+				resetTime: reset4h,
+			},
+		},
+		"gemini-2.5-pro": {
+			displayName: "Gemini 2.5 Pro",
+			quotaInfo: {
+				remainingFraction: 0.85,
+				resetTime: reset4h,
+			},
+		},
+		"gemini-3-flash-agent": {
+			displayName: "Gemini 3 Flash Agent",
+			quotaInfo: {
+				resetTime: reset5d,
+			},
+		},
+		"gemini-4-argon-high": {
+			displayName: "Gemini 4 Argon High",
+			quotaInfo: {
+				remainingFraction: 0.5,
+				resetTime: reset5d,
+			},
+		},
+		"claude-sonnet-5-5-high": {
+			displayName: "Claude Sonnet 5.5 High",
+			quotaInfo: {
+				remainingFraction: 0.9,
+				resetTime: reset4h,
+			},
+		},
+		"gpt-oss-120b-medium": {
+			displayName: "GPT OSS 120B Medium",
+			quotaInfo: {
+				remainingFraction: 1.0,
+				resetTime: reset4h,
+			},
+		},
+		tab_flash_lite_preview: {
+			displayName: "Tab Flash Lite Preview",
+			quotaInfo: {
+				remainingFraction: 1.0,
+			},
+		},
+	},
+};
+
+const parsedModelsWins = parseModelsQuota(JSON.stringify(mockModelsPayload), mockNow);
+
+// 1. Parses realistic Gemini models with 5h quota, keeping most restrictive (0.72 vs 0.85 -> 72%)
+const gemini5hWin = parsedModelsWins.find((w) => w.label === "Gemini Models · 5h");
+console.assert(gemini5hWin !== undefined, "found Gemini Models · 5h");
+console.assert(
+	Math.abs(gemini5hWin.remainingPct - 72) < 0.001,
+	`Gemini 5h remainingPct expected 72, got ${gemini5hWin?.remainingPct}`,
+);
+console.assert(gemini5hWin.resetIso === reset4h, "Gemini 5h resetIso matches reset4h");
+
+// 2. Handles omitted remainingFraction as 0 when resetTime is present (gemini-3-flash-agent)
+const geminiWeeklyWin = parsedModelsWins.find((w) => w.label === "Gemini Models · weekly");
+console.assert(geminiWeeklyWin !== undefined, "found Gemini Models · weekly");
+console.assert(
+	geminiWeeklyWin.remainingPct === 0,
+	`Gemini weekly remainingPct expected 0, got ${geminiWeeklyWin?.remainingPct}`,
+);
+console.assert(geminiWeeklyWin.resetIso === reset5d, "Gemini weekly resetIso matches reset5d");
+
+// 3. Correctly groups Gemini, Argon, and Claude/GPT models
+const argonWeeklyWin = parsedModelsWins.find((w) => w.label === "Argon Models · weekly");
+console.assert(argonWeeklyWin !== undefined, "found Argon Models · weekly");
+console.assert(argonWeeklyWin.remainingPct === 50, "Argon remainingPct 50");
+
+const claudeGpt5hWin = parsedModelsWins.find((w) => w.label === "Claude and GPT models · 5h");
+console.assert(claudeGpt5hWin !== undefined, "found Claude and GPT models · 5h");
+console.assert(
+	Math.abs(claudeGpt5hWin.remainingPct - 90) < 0.001,
+	"Claude/GPT remainingPct 90 (min of 0.90 and 1.0)",
+);
+
+// Non-matching model or model without resetTime is skipped
+console.assert(!parsedModelsWins.some((w) => w.label.includes("Tab")), "skipped non-matching models");
+
+// Array models payload support
+const arrayPayload = {
+	models: [{ id: "gemini-3.8-flash-tiered", quotaInfo: { remainingFraction: 0.65, resetTime: reset4h } }],
+};
+const parsedArrayWins = parseModelsQuota(JSON.stringify(arrayPayload), mockNow);
+console.assert(
+	parsedArrayWins.length === 1 && Math.abs(parsedArrayWins[0].remainingPct - 65) < 0.001,
+	"parseModelsQuota array shape",
+);
+
+// 4. Confirms mergeWins updates Gemini Models · 5h from 100% to more restrictive percentage and sets reset countdown
+const staleSummaryWins = [
+	{ label: "Gemini Models · weekly", remainingPct: 91, resetIso: reset5d },
+	{ label: "Gemini Models · 5h", remainingPct: 100, resetIso: null },
+];
+const liveModelWins = [{ label: "Gemini Models · 5h", remainingPct: 72, resetIso: reset4h }];
+const mergedWithLive = mergeWins(staleSummaryWins, liveModelWins);
+const updatedGemini5h = mergedWithLive.find((w) => w.label === "Gemini Models · 5h");
+console.assert(updatedGemini5h?.remainingPct === 72, "mergeWins updated Gemini 5h from 100% to 72%");
+console.assert(updatedGemini5h?.resetIso === reset4h, "mergeWins set reset countdown for Gemini 5h");
+const renderedUpdated = renderWindows([updatedGemini5h], mockNow)[0];
+console.assert(
+	renderedUpdated.includes("72% left · resets in 4h 0m"),
+	`render contains active reset countdown: ${renderedUpdated}`,
 );
 
 console.log("units OK:", summaryFromWins(wins, now));
