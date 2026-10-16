@@ -6,7 +6,7 @@
  *    fetched exactly like the EasyCLIProxyAPI panel does via the proxy management
  *    API `POST /v0/management/api-call`. Providers: claude + antigravity/gemini
  *    (verified), codex + kimi + xai (best-effort, marked (unverified)).
- *  - Footer quota display: automatically refreshed at turn start/end.
+ *  - Footer quota display: automatically refreshed on session start, model select, and periodic 3-minute interval.
  *
  * No secrets in source. Management key is read at runtime from env,
  * ~/.pi/agent/cliproxyapi-quota.json, or the GUI config.toml. See AGENTS.md.
@@ -1015,13 +1015,16 @@ function isPrimaryUiSession(ctx: ExtensionContext): boolean {
 	return ctx.hasUI && ctx.mode === "tui";
 }
 
+export const REFRESH_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
+
 export default function (pi: ExtensionAPI): void {
 	// ----- /quota -----
 	const QUOTA_KEY = "cliproxy-quota";
-	const REFRESH_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
 	let currentCtx: ExtensionContext | undefined;
 	let intervalTimer: ReturnType<typeof setInterval> | undefined;
 	let isFetching = false;
+	let lastFetchTime = 0;
+	let lastModelKey = "";
 
 	async function collectUsage(
 		now: number,
@@ -1038,14 +1041,21 @@ export default function (pi: ExtensionAPI): void {
 	async function runQuota(ctx: ExtensionContext, silent = false): Promise<void> {
 		currentCtx = ctx;
 		if (isFetching && silent) return;
+		const currentModelKey = `${ctx.model?.provider ?? ""}:${ctx.model?.id ?? ""}`;
+		const now = Date.now();
+		if (silent && currentModelKey === lastModelKey && now - lastFetchTime < REFRESH_INTERVAL_MS) {
+			return;
+		}
 		isFetching = true;
 		if (!silent) ctx.ui.notify("Fetching quota…", "info");
 		try {
 			const { blocks, footer } = await collectUsage(
-				Date.now(),
+				now,
 				providerFromModel(ctx.model),
 				ctx.model?.id,
 			);
+			lastFetchTime = Date.now();
+			lastModelKey = currentModelKey;
 			if (!silent) ctx.ui.notify(`Subscription quota\n${blocks.join("\n")}`, "info");
 			if (footer && isPrimaryUiSession(ctx)) {
 				ctx.ui.setStatus(QUOTA_KEY, footer);
@@ -1094,12 +1104,6 @@ export default function (pi: ExtensionAPI): void {
 		void runQuota(ctx, true);
 	});
 
-	// Completed assistant turns immediately refresh the footer quota
-	pi.on("turn_end", (_e, ctx) => {
-		currentCtx = ctx;
-		void runQuota(ctx, true);
-	});
-
 	// Cleanup on session shutdown
 	pi.on("session_shutdown", () => {
 		if (intervalTimer) {
@@ -1107,6 +1111,8 @@ export default function (pi: ExtensionAPI): void {
 			intervalTimer = undefined;
 		}
 		currentCtx = undefined;
+		lastFetchTime = 0;
+		lastModelKey = "";
 	});
 
 	// Works while streaming: shortcut fetches and shows quota immediately.

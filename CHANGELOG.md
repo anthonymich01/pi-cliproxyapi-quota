@@ -2,6 +2,12 @@
 
 All notable changes to `pi-cliproxyapi-quota` will be documented in this file.
 
+## [0.3.6] - 2026-10-17
+
+### Fixed
+- Fixed unthrottled quota polling during agentic tool use: removed `turn_end` listener so multi-step agent runs do not trigger quota fetches on every tool execution cycle. Quota polling strictly occurs on the fixed 3-minute interval (`startRefreshInterval`), on session start (`session_start`), model select (`model_select`), and manual command/shortcut invocations (`/quota` and `ctrl+shift+q`).
+- Added timestamp throttle to background quota refreshes so background requests never execute more frequently than `REFRESH_INTERVAL_MS` (3 minutes).
+
 ## [0.3.5] - 2026-10-17
 
 ### Fixed
