@@ -4,6 +4,8 @@
 
 **English** | [中文](#中文说明)
 
+> **Note**: Supports the latest CLI proxy version (**EasyCLIProxyAPI App v0.3.41, Core v8.0.31**) and the new **Gemini 4 Argon** (`gemini-4-argon-high`) model with dedicated weekly quota window handling.
+
 A [pi](https://pi.dev) extension for users who route their AI subscriptions into pi through
 [CLIProxyAPI / EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI).
 
@@ -11,7 +13,7 @@ It surfaces subscription limits for reverse-proxied models inside pi:
 
 - **Quota** — see subscription limits for **every OAuth provider** the proxy holds without leaving pi.
 
-Supported providers: **Claude**, **Antigravity / Gemini Code Assist**, and **Kimi** (verified), plus
+Supported providers: **Claude**, **Antigravity / Gemini Code Assist** (including **Gemini 4 Argon**), and **Kimi** (verified), plus
 **Codex** and **xAI / Grok** (best‑effort, shown as `(unverified)` until confirmed against a real
 account — see [Scope](#scope--limitations)).
 
@@ -91,12 +93,14 @@ MIT
 
 ## 中文说明
 
+> **提示**：已支持最新 CLI 代理版本（**EasyCLIProxyAPI App v0.3.41, Core v8.0.31**）以及新模型 **Gemini 4 Argon**（`gemini-4-argon-high`，支持独立周配额跟踪与显示）。
+
 适用于通过 [CLIProxyAPI / EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI)
 把各 AI 订阅接入 [pi](https://pi.dev) 的用户。它补上了 pi 对反向代理模型不暴露的订阅配额：
 
 - **额度** — 在 pi 里直接看代理持有的**每个 OAuth 提供方**的订阅限额。
 
-支持的提供方：**Claude**、**Antigravity / Gemini Code Assist**、**Kimi**（已验证），以及 **Codex**、
+支持的提供方：**Claude**、**Antigravity / Gemini Code Assist**（包含 **Gemini 4 Argon**）、**Kimi**（已验证），以及 **Codex**、
 **xAI / Grok**（尽力支持，在真实账号上校准前显示为 `(unverified)`）。
 
 ### 功能

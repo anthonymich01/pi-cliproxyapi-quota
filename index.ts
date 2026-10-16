@@ -231,16 +231,49 @@ const claudeAdapter: Adapter = {
 };
 
 // ---- antigravity / gemini code assist (VERIFIED): POST retrieveUserQuotaSummary ----
-// Mirror the CPA panel: body is {project} (NOT {metadata}), tried across hosts in
-// order daily -> daily-sandbox -> prod. The same account reports DIFFERENT quota
-// per host environment (e.g. 88% weekly on daily vs 57% on prod); Antigravity
-// traffic is served by the daily host, so it is authoritative.
+// Prod returns both Gemini Models and Claude/GPT models (and Argon models if enabled),
+// while daily serves Antigravity traffic. We query both and merge all model quota groups,
+// keeping the most restrictive remaining fraction when a group appears in both.
 const ANTIGRAVITY_HOSTS = [
-	"https://daily-cloudcode-pa.googleapis.com",
-	"https://daily-cloudcode-pa.sandbox.googleapis.com",
 	"https://cloudcode-pa.googleapis.com",
+	"https://daily-cloudcode-pa.googleapis.com",
 ];
 const ANTIGRAVITY_UA = "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)";
+
+export function mergeWins(existingWins: Win[], newWins: Win[]): Win[] {
+	const map = new Map<string, Win>();
+	const order: string[] = [];
+	for (const w of existingWins) {
+		map.set(w.label, w);
+		order.push(w.label);
+	}
+	for (const w of newWins) {
+		const existing = map.get(w.label);
+		if (!existing) {
+			map.set(w.label, w);
+			order.push(w.label);
+		} else {
+			if (existing.remainingPct === null) {
+				map.set(w.label, w);
+			} else if (w.remainingPct !== null) {
+				if (w.remainingPct < existing.remainingPct) {
+					map.set(w.label, w);
+				} else if (w.remainingPct === existing.remainingPct) {
+					if (!existing.resetIso && w.resetIso) {
+						map.set(w.label, w);
+					} else if (existing.resetIso && w.resetIso) {
+						const tExist = Date.parse(existing.resetIso);
+						const tNew = Date.parse(w.resetIso);
+						if (!Number.isNaN(tNew) && (Number.isNaN(tExist) || tNew < tExist)) {
+							map.set(w.label, w);
+						}
+					}
+				}
+			}
+		}
+	}
+	return order.map((label) => map.get(label)!);
+}
 
 function parseQuotaSummary(body: string): Win[] {
 	const data = JSON.parse(body) as {
@@ -285,31 +318,32 @@ const antigravityAdapter: Adapter = {
 				// fall through to the legacy metadata call below
 			}
 		}
-		if (project) {
-			let lastErr: unknown;
-			for (const host of ANTIGRAVITY_HOSTS) {
-				try {
-					const body = await proxyCall(base, key, {
-						authIndex, method: "POST",
-						url: `${host}/v1internal:retrieveUserQuotaSummary`,
-						header, body: JSON.stringify({ project }),
-					});
-					return parseQuotaSummary(body);
-				} catch (err) {
-					lastErr = err;
-				}
+		const payload = project ? { project } : { metadata: { ideType: "ANTIGRAVITY" } };
+		let mergedWins: Win[] = [];
+		let lastErr: unknown;
+		let successCount = 0;
+
+		for (const host of ANTIGRAVITY_HOSTS) {
+			try {
+				const body = await proxyCall(base, key, {
+					authIndex,
+					method: "POST",
+					url: `${host}/v1internal:retrieveUserQuotaSummary`,
+					header,
+					body: JSON.stringify(payload),
+				});
+				const wins = parseQuotaSummary(body);
+				mergedWins = mergeWins(mergedWins, wins);
+				successCount++;
+			} catch (err) {
+				lastErr = err;
 			}
-			throw lastErr;
 		}
-		// no project id (e.g. plain gemini-cli credential): legacy prod-host call
-		const body = await proxyCall(base, key, {
-			authIndex,
-			method: "POST",
-			url: "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
-			header,
-			body: JSON.stringify({ metadata: { ideType: "ANTIGRAVITY" } }),
-		});
-		return parseQuotaSummary(body);
+
+		if (successCount === 0) {
+			throw lastErr ?? new Error("Failed to retrieve Antigravity quota");
+		}
+		return mergedWins;
 	},
 };
 
@@ -410,7 +444,17 @@ const ADAPTERS: Record<string, Adapter> = {
 
 /** Guess which quota provider the current pi model routes to (by provider/id text). */
 export function providerFromModel(model: { provider?: string; id?: string } | undefined): string | null {
-	const s = `${model?.provider ?? ""} ${model?.id ?? ""}`.toLowerCase();
+	const prov = (model?.provider ?? "").toLowerCase();
+	const id = (model?.id ?? "").toLowerCase();
+
+	if (prov.includes("antigravity") || prov.includes("gemini") || prov.includes("argon")) {
+		return "antigravity";
+	}
+	if (id.includes("argon")) {
+		return "antigravity";
+	}
+
+	const s = `${prov} ${id}`;
 	if (s.includes("claude")) return "claude";
 	if (s.includes("gemini") || s.includes("antigravity")) return "antigravity";
 	if (s.includes("codex") || s.includes("gpt")) return "codex";
@@ -477,25 +521,51 @@ export function getLastActiveTime(c: AuthFile): number {
 export function filterWinsForModel(wins: Win[], modelId?: string | null): Win[] {
 	if (wins.length === 0) return wins;
 	const mid = (modelId ?? "").toLowerCase();
+
 	const hasGeminiGroup = wins.some((w) => w.label.toLowerCase().includes("gemini"));
 	const hasClaudeGroup = wins.some(
 		(w) => w.label.toLowerCase().includes("claude") || w.label.toLowerCase().includes("gpt"),
 	);
-	if (hasGeminiGroup && hasClaudeGroup) {
-		if (mid.includes("gemini")) {
-			const geminiWins = wins.filter((w) => w.label.toLowerCase().includes("gemini"));
-			if (geminiWins.length > 0) return geminiWins;
-		} else if (mid.includes("claude") || mid.includes("gpt") || mid.includes("codex")) {
-			const nonGeminiWins = wins.filter(
-				(w) => w.label.toLowerCase().includes("claude") || w.label.toLowerCase().includes("gpt"),
-			);
-			if (nonGeminiWins.length > 0) return nonGeminiWins;
-		} else {
-			// If no specific model or unknown, don't mix groups: pick the primary group of the credential
-			const geminiWins = wins.filter((w) => w.label.toLowerCase().includes("gemini"));
-			if (geminiWins.length > 0) return geminiWins;
-		}
+	const hasArgonGroup = wins.some((w) => w.label.toLowerCase().includes("argon"));
+	const isMultiGroup = (Number(hasGeminiGroup) + Number(hasClaudeGroup) + Number(hasArgonGroup)) > 1;
+
+	if (mid.includes("argon")) {
+		const argonWins = wins.filter((w) => w.label.toLowerCase().includes("argon"));
+		if (argonWins.length > 0) return argonWins;
 	}
+
+	if (mid.includes("gemini")) {
+		const geminiWins = wins.filter((w) => {
+			const l = w.label.toLowerCase();
+			return l.includes("gemini") && !l.includes("argon");
+		});
+		if (geminiWins.length > 0) return geminiWins;
+	}
+
+	if (mid.includes("claude") || mid.includes("gpt") || mid.includes("codex")) {
+		const nonGeminiWins = wins.filter((w) => {
+			const l = w.label.toLowerCase();
+			return l.includes("claude") || l.includes("gpt");
+		});
+		if (nonGeminiWins.length > 0) return nonGeminiWins;
+	}
+
+	// If no model or unknown, pick the primary group cleanly if multi-group
+	if (isMultiGroup) {
+		const geminiWins = wins.filter((w) => {
+			const l = w.label.toLowerCase();
+			return l.includes("gemini") && !l.includes("argon");
+		});
+		if (geminiWins.length > 0) return geminiWins;
+		const anyGemini = wins.filter((w) => w.label.toLowerCase().includes("gemini"));
+		if (anyGemini.length > 0) return anyGemini;
+		const nonGeminiWins = wins.filter((w) => {
+			const l = w.label.toLowerCase();
+			return l.includes("claude") || l.includes("gpt");
+		});
+		if (nonGeminiWins.length > 0) return nonGeminiWins;
+	}
+
 	return wins;
 }
 

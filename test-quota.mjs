@@ -6,6 +6,9 @@ import {
 	collectQuota,
 	renderWindows,
 	summaryFromWins,
+	filterWinsForModel,
+	providerFromModel,
+	mergeWins,
 	formatReset,
 	compactReset,
 	getQuotaColor,
@@ -80,6 +83,104 @@ const nearFull = [
 	{ label: "5-hour (session)", remainingPct: 99.96, resetIso: "2026-08-19T14:00:00Z" },
 ];
 console.assert(summaryFromWins(nearFull, now) === "Quota 5h 100% left", "footer near-full quota");
+
+// filterWinsForModel unit checks
+const multiGroupWins = [
+	{ label: "Gemini Models · 5h", remainingPct: 100, resetIso: "2026-08-19T14:00:00Z" },
+	{ label: "Gemini Models · weekly", remainingPct: 90, resetIso: "2026-08-25T00:00:00Z" },
+	{ label: "Claude and GPT models · 5h", remainingPct: 100, resetIso: "2026-08-19T14:00:00Z" },
+	{ label: "Claude and GPT models · weekly", remainingPct: 80, resetIso: "2026-08-25T00:00:00Z" },
+	{ label: "Argon Models · weekly", remainingPct: 50, resetIso: "2026-08-25T00:00:00Z" },
+];
+
+// 1. Argon model returns Argon window
+const argonResult = filterWinsForModel(multiGroupWins, "gemini-4-argon-high");
+console.assert(argonResult.length === 1 && argonResult[0].label === "Argon Models · weekly", "filter argon window");
+
+// 2. Gemini model returns Gemini windows (excluding Argon)
+const geminiResult = filterWinsForModel(multiGroupWins, "gemini-2.5-pro");
+console.assert(
+	geminiResult.length === 2 &&
+		geminiResult.every((w) => w.label.startsWith("Gemini Models")),
+	"filter gemini windows",
+);
+
+// 3. Claude / GPT models return Claude and GPT windows
+const claudeResult = filterWinsForModel(multiGroupWins, "claude-3-7-sonnet");
+console.assert(
+	claudeResult.length === 2 &&
+		claudeResult.every((w) => w.label.startsWith("Claude and GPT models")),
+	"filter claude windows",
+);
+const gptResult = filterWinsForModel(multiGroupWins, "gpt-4o");
+console.assert(
+	gptResult.length === 2 &&
+		gptResult.every((w) => w.label.startsWith("Claude and GPT models")),
+	"filter gpt windows",
+);
+
+// 4. Argon model fallback when no Argon window exists
+const multiGroupWithoutArgon = multiGroupWins.filter((w) => !w.label.includes("Argon"));
+const argonFallbackResult = filterWinsForModel(multiGroupWithoutArgon, "gemini-4-argon-high");
+console.assert(
+	argonFallbackResult.length === 2 &&
+		argonFallbackResult.every((w) => w.label.startsWith("Gemini Models")),
+	"filter argon fallback to gemini",
+);
+
+// 5. Unknown or null model picks primary group cleanly (Gemini)
+const defaultResult = filterWinsForModel(multiGroupWins, null);
+console.assert(
+	defaultResult.length === 2 &&
+		defaultResult.every((w) => w.label.startsWith("Gemini Models")),
+	"filter default primary group",
+);
+
+// providerFromModel unit checks
+console.assert(
+	providerFromModel({ provider: "antigravity", id: "claude-3-5-sonnet" }) === "antigravity",
+	"providerFromModel explicit antigravity with claude model",
+);
+console.assert(
+	providerFromModel({ provider: "antigravity", id: "gemini-4-argon-high" }) === "antigravity",
+	"providerFromModel antigravity argon",
+);
+console.assert(
+	providerFromModel({ provider: "gemini", id: "gemini-2.5-pro" }) === "antigravity",
+	"providerFromModel gemini provider",
+);
+console.assert(
+	providerFromModel({ provider: "google", id: "gemini-4-argon-high" }) === "antigravity",
+	"providerFromModel argon in model id routes to antigravity",
+);
+console.assert(
+	providerFromModel({ provider: "anthropic", id: "claude-3-5-sonnet" }) === "claude",
+	"providerFromModel anthropic claude",
+);
+console.assert(
+	providerFromModel({ provider: "openai", id: "gpt-4o" }) === "codex",
+	"providerFromModel openai gpt",
+);
+
+// mergeWins unit checks (keeping more restrictive remaining fraction)
+const prodWins = [
+	{ label: "Gemini Models · weekly", remainingPct: 91, resetIso: "2026-08-25T00:00:00Z" },
+	{ label: "Claude and GPT models · weekly", remainingPct: 100, resetIso: "2026-08-25T00:00:00Z" },
+];
+const dailyWins = [
+	{ label: "Claude and GPT models · weekly", remainingPct: 80, resetIso: "2026-08-24T00:00:00Z" },
+];
+const merged = mergeWins(prodWins, dailyWins);
+console.assert(merged.length === 2, "mergeWins preserves all groups");
+console.assert(
+	merged.find((w) => w.label === "Gemini Models · weekly")?.remainingPct === 91,
+	"mergeWins keeps unique group",
+);
+console.assert(
+	merged.find((w) => w.label === "Claude and GPT models · weekly")?.remainingPct === 80,
+	"mergeWins keeps most restrictive remainingPct",
+);
+
 console.log("units OK:", summaryFromWins(wins, now));
 
 const base = resolveBaseUrl();
