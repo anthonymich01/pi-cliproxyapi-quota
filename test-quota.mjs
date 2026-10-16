@@ -1,6 +1,6 @@
 // Live smoke test of the quota data path + pure renderers.
 // Run: node test-quota.mjs
-import {
+import extension, {
 	resolveBaseUrl,
 	resolveManagementKey,
 	collectQuota,
@@ -20,6 +20,7 @@ import {
 	ANSI_YELLOW,
 	ANSI_ORANGE,
 	ANSI_RED,
+	REFRESH_INTERVAL_MS,
 } from "./index.ts";
 
 // formatReset unit checks
@@ -337,6 +338,32 @@ console.assert(
 	renderedUpdated.includes("72% left · resets in 4h 0m"),
 	`render contains active reset countdown: ${renderedUpdated}`,
 );
+
+// Extension registration and refresh interval checks
+console.assert(REFRESH_INTERVAL_MS === 3 * 60 * 1000, "REFRESH_INTERVAL_MS is 3 minutes");
+
+const registeredEvents = {};
+const registeredCommands = {};
+const registeredShortcuts = {};
+const mockPi = {
+	on: (event, handler) => {
+		registeredEvents[event] = handler;
+	},
+	registerShortcut: (key, opts) => {
+		registeredShortcuts[key] = opts;
+	},
+	registerCommand: (cmd, opts) => {
+		registeredCommands[cmd] = opts;
+	},
+};
+extension(mockPi);
+
+console.assert(!("turn_end" in registeredEvents), "turn_end must not be registered (prevents unthrottled tool call polling)");
+console.assert("session_start" in registeredEvents, "session_start must be registered");
+console.assert("model_select" in registeredEvents, "model_select must be registered");
+console.assert("session_shutdown" in registeredEvents, "session_shutdown must be registered");
+console.assert("ctrl+shift+q" in registeredShortcuts, "ctrl+shift+q shortcut registered");
+console.assert("quota" in registeredCommands, "quota command registered");
 
 console.log("units OK:", summaryFromWins(wins, now));
 
