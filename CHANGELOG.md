@@ -2,6 +2,14 @@
 
 All notable changes to `pi-cliproxyapi-quota` will be documented in this file.
 
+## [0.3.5] - 2026-10-17
+
+### Fixed
+- Fixed Antigravity 7-day quota not updating: switched `ANTIGRAVITY_UA` to the Antigravity Hub User-Agent (`antigravity/hub/2.23.0 ...`), ensuring daily CloudCode endpoints return live `Gemini Models` weekly quota instead of omitting it.
+- Prioritized daily CloudCode endpoints (`daily-cloudcode-pa.googleapis.com`, `daily-cloudcode-pa.sandbox.googleapis.com`) ahead of production in `ANTIGRAVITY_HOSTS`.
+- Added `turn_end` listener in extension registration to immediately refresh the footer quota on assistant turn completion without waiting for the 3-minute poll interval.
+- Ensured `startRefreshInterval` and background polling maintain `currentCtx` cleanly.
+
 ## [0.3.4] - 2026-10-16
 
 ### Fixed

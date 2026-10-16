@@ -232,13 +232,20 @@ const claudeAdapter: Adapter = {
 
 // ---- antigravity / gemini code assist (VERIFIED): POST retrieveUserQuotaSummary ----
 // Prod returns both Gemini Models and Claude/GPT models (and Argon models if enabled),
-// while daily serves Antigravity traffic. We query both and merge all model quota groups,
-// keeping the most restrictive remaining fraction when a group appears in both.
-const ANTIGRAVITY_HOSTS = [
-	"https://cloudcode-pa.googleapis.com",
+// while daily serves Antigravity traffic. We query daily endpoints ahead of production
+// and merge all model quota groups, keeping the most restrictive remaining fraction.
+export const ANTIGRAVITY_HOSTS = [
 	"https://daily-cloudcode-pa.googleapis.com",
+	"https://daily-cloudcode-pa.sandbox.googleapis.com",
+	"https://cloudcode-pa.googleapis.com",
 ];
-const ANTIGRAVITY_UA = "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)";
+export const ANTIGRAVITY_UA = `antigravity/hub/2.23.0 ${
+	process.platform === "darwin"
+		? "darwin/arm64"
+		: process.platform === "win32"
+			? "windows/amd64"
+			: "linux/x64"
+}`;
 
 export function mergeWins(existingWins: Win[], newWins: Win[]): Win[] {
 	const map = new Map<string, Win>();
@@ -1029,6 +1036,7 @@ export default function (pi: ExtensionAPI): void {
 
 	// silent=true only refreshes the footer (used for background auto-refresh).
 	async function runQuota(ctx: ExtensionContext, silent = false): Promise<void> {
+		currentCtx = ctx;
 		if (isFetching && silent) return;
 		isFetching = true;
 		if (!silent) ctx.ui.notify("Fetching quota…", "info");
@@ -1083,6 +1091,12 @@ export default function (pi: ExtensionAPI): void {
 	// Switching models switches the footer to that provider's quota immediately
 	pi.on("model_select", (_e, ctx) => {
 		startRefreshInterval(ctx);
+		void runQuota(ctx, true);
+	});
+
+	// Completed assistant turns immediately refresh the footer quota
+	pi.on("turn_end", (_e, ctx) => {
+		currentCtx = ctx;
 		void runQuota(ctx, true);
 	});
 
