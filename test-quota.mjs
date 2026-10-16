@@ -14,6 +14,8 @@ import {
 	compactReset,
 	getQuotaColor,
 	getResetColor,
+	ANTIGRAVITY_UA,
+	ANTIGRAVITY_HOSTS,
 	ANSI_GREEN,
 	ANSI_YELLOW,
 	ANSI_ORANGE,
@@ -180,6 +182,42 @@ console.assert(
 console.assert(
 	merged.find((w) => w.label === "Claude and GPT models · weekly")?.remainingPct === 80,
 	"mergeWins keeps most restrictive remainingPct",
+);
+
+// mergeWins keeps daily weekly limit over stale prod
+const dailyGemini = [
+	{ label: "Gemini Models · weekly", remainingPct: 87, resetIso: "2026-08-25T00:00:00Z" },
+];
+const prodGemini = [
+	{ label: "Gemini Models · weekly", remainingPct: 91, resetIso: "2026-08-25T00:00:00Z" },
+];
+const mergedGemini = mergeWins(dailyGemini, prodGemini);
+console.assert(
+	mergedGemini.find((w) => w.label === "Gemini Models · weekly")?.remainingPct === 87,
+	"mergeWins keeps daily 87% over stale prod 91%",
+);
+
+// ANTIGRAVITY_UA and ANTIGRAVITY_HOSTS checks
+console.assert(
+	ANTIGRAVITY_UA.startsWith("antigravity/hub/2.23.0"),
+	`ANTIGRAVITY_UA prefix expected antigravity/hub/2.23.0, got ${ANTIGRAVITY_UA}`,
+);
+const expectedUaTail =
+	process.platform === "darwin"
+		? "darwin/arm64"
+		: process.platform === "win32"
+			? "windows/amd64"
+			: "linux/x64";
+console.assert(
+	ANTIGRAVITY_UA === `antigravity/hub/2.23.0 ${expectedUaTail}`,
+	`ANTIGRAVITY_UA matches platform signature, got ${ANTIGRAVITY_UA}`,
+);
+console.assert(
+	Array.isArray(ANTIGRAVITY_HOSTS) &&
+		ANTIGRAVITY_HOSTS[0] === "https://daily-cloudcode-pa.googleapis.com" &&
+		ANTIGRAVITY_HOSTS[1] === "https://daily-cloudcode-pa.sandbox.googleapis.com" &&
+		ANTIGRAVITY_HOSTS[2] === "https://cloudcode-pa.googleapis.com",
+	"ANTIGRAVITY_HOSTS prioritizes daily endpoints ahead of production",
 );
 
 // parseModelsQuota unit checks
