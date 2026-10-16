@@ -14,6 +14,7 @@ import extension, {
 	compactReset,
 	getQuotaColor,
 	getResetColor,
+	antigravityAdapter,
 	ANTIGRAVITY_UA,
 	ANTIGRAVITY_HOSTS,
 	ANSI_GREEN,
@@ -166,13 +167,13 @@ console.assert(
 	"providerFromModel openai gpt",
 );
 
-// mergeWins unit checks (keeping more restrictive remaining fraction)
+// mergeWins unit checks (keeping more restrictive remaining fraction within same quota cycle)
 const prodWins = [
 	{ label: "Gemini Models · weekly", remainingPct: 91, resetIso: "2026-08-25T00:00:00Z" },
 	{ label: "Claude and GPT models · weekly", remainingPct: 100, resetIso: "2026-08-25T00:00:00Z" },
 ];
 const dailyWins = [
-	{ label: "Claude and GPT models · weekly", remainingPct: 80, resetIso: "2026-08-24T00:00:00Z" },
+	{ label: "Claude and GPT models · weekly", remainingPct: 80, resetIso: "2026-08-25T00:00:00Z" },
 ];
 const merged = mergeWins(prodWins, dailyWins);
 console.assert(merged.length === 2, "mergeWins preserves all groups");
@@ -182,20 +183,27 @@ console.assert(
 );
 console.assert(
 	merged.find((w) => w.label === "Claude and GPT models · weekly")?.remainingPct === 80,
-	"mergeWins keeps most restrictive remainingPct",
+	"mergeWins keeps most restrictive remainingPct within same window",
 );
 
-// mergeWins keeps daily weekly limit over stale prod
-const dailyGemini = [
-	{ label: "Gemini Models · weekly", remainingPct: 87, resetIso: "2026-08-25T00:00:00Z" },
+// mergeWins keeps live daily weekly limit over stale prod (both directions)
+const dailyLiveGemini = [
+	{ label: "Gemini Models · weekly", remainingPct: 97, resetIso: "2026-08-25T00:00:00Z" },
 ];
-const prodGemini = [
-	{ label: "Gemini Models · weekly", remainingPct: 91, resetIso: "2026-08-25T00:00:00Z" },
+const prodStaleGemini = [
+	{ label: "Gemini Models · weekly", remainingPct: 91, resetIso: "2026-08-23T00:00:00Z" },
 ];
-const mergedGemini = mergeWins(dailyGemini, prodGemini);
+// 1. Daily merged first: stale prod with older reset date does NOT clobber live daily 97%
+const mergedDailyOverProd = mergeWins(dailyLiveGemini, prodStaleGemini);
 console.assert(
-	mergedGemini.find((w) => w.label === "Gemini Models · weekly")?.remainingPct === 87,
-	"mergeWins keeps daily 87% over stale prod 91%",
+	mergedDailyOverProd.find((w) => w.label === "Gemini Models · weekly")?.remainingPct === 97,
+	"mergeWins keeps live daily 97% over stale prod 91% with older reset date",
+);
+// 2. Stale prod merged first: live daily with newer reset date cleanly clobbers stale prod 91%
+const mergedProdOverDaily = mergeWins(prodStaleGemini, dailyLiveGemini);
+console.assert(
+	mergedProdOverDaily.find((w) => w.label === "Gemini Models · weekly")?.remainingPct === 97,
+	"mergeWins replaces stale prod 91% with live daily 97% having newer reset date",
 );
 
 // ANTIGRAVITY_UA and ANTIGRAVITY_HOSTS checks
@@ -364,6 +372,224 @@ console.assert("model_select" in registeredEvents, "model_select must be registe
 console.assert("session_shutdown" in registeredEvents, "session_shutdown must be registered");
 console.assert("ctrl+shift+q" in registeredShortcuts, "ctrl+shift+q shortcut registered");
 console.assert("quota" in registeredCommands, "quota command registered");
+
+// CPA panel fallback order mock tests for antigravityAdapter
+{
+	const originalFetch = globalThis.fetch;
+	const queriedUrls = [];
+	globalThis.fetch = async (url, opts) => {
+		if (String(url).endsWith("/v0/management/api-call")) {
+			const reqBody = JSON.parse(opts.body);
+			queriedUrls.push(reqBody.url);
+			if (reqBody.url.includes("retrieveUserQuotaSummary")) {
+				return {
+					ok: true,
+					json: async () => ({
+						status_code: 200,
+						body: JSON.stringify({
+							groups: [
+								{
+									displayName: "Gemini Models",
+									buckets: [{ window: "weekly", remainingFraction: 0.97, resetTime: "2026-10-23T21:59:43Z" }],
+								},
+							],
+						}),
+					}),
+				};
+			}
+			if (reqBody.url.includes("fetchAvailableModels")) {
+				return {
+					ok: true,
+					json: async () => ({
+						status_code: 200,
+						body: JSON.stringify({
+							models: {
+								"gemini-2.5-pro": { quotaInfo: { remainingFraction: 0.9, resetTime: "2026-10-17T02:59:43Z" } },
+							},
+						}),
+					}),
+				};
+			}
+		}
+		return originalFetch(url, opts);
+	};
+
+	try {
+		const result = await antigravityAdapter.fetch("http://mock-base", "mock-key", {
+			id: "test",
+			name: "test",
+			auth_index: "mock-auth",
+			project_id: "test-proj",
+		});
+		// 1. Daily endpoint is queried
+		console.assert(
+			queriedUrls.some((u) => u === "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"),
+			"fallback order: queries daily retrieveUserQuotaSummary first",
+		);
+		// 2. Production endpoint must NOT be queried when daily succeeds
+		console.assert(
+			!queriedUrls.some((u) => u === "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"),
+			"fallback order: stops querying production retrieveUserQuotaSummary when daily succeeds",
+		);
+		console.assert(
+			!queriedUrls.some((u) => u === "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary"),
+			"fallback order: does not query sandbox retrieveUserQuotaSummary when daily succeeds",
+		);
+		// 3. fetchAvailableModels queries the same active host (daily) and not production
+		console.assert(
+			queriedUrls.some((u) => u === "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"),
+			"fallback order: queries daily fetchAvailableModels on the same active host",
+		);
+		console.assert(
+			!queriedUrls.some((u) => u === "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"),
+			"fallback order: does not query production fetchAvailableModels when daily succeeds",
+		);
+		const weeklyWin = result.find((w) => w.label === "Gemini Models · weekly");
+		console.assert(weeklyWin?.remainingPct === 97, "retained live daily 97% weekly quota");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+}
+
+// Fallback to sandbox / production when daily fails
+{
+	const originalFetch = globalThis.fetch;
+	const queriedUrls = [];
+	globalThis.fetch = async (url, opts) => {
+		if (String(url).endsWith("/v0/management/api-call")) {
+			const reqBody = JSON.parse(opts.body);
+			queriedUrls.push(reqBody.url);
+			// Daily fails, sandbox succeeds
+			if (reqBody.url.startsWith("https://daily-cloudcode-pa.googleapis.com")) {
+				return {
+					ok: true,
+					json: async () => ({ status_code: 500, body: "daily unavailable" }),
+				};
+			}
+			if (reqBody.url.includes("retrieveUserQuotaSummary")) {
+				return {
+					ok: true,
+					json: async () => ({
+						status_code: 200,
+						body: JSON.stringify({
+							groups: [
+								{
+									displayName: "Gemini Models",
+									buckets: [{ window: "weekly", remainingFraction: 0.95, resetTime: "2026-10-23T21:59:43Z" }],
+								},
+							],
+						}),
+					}),
+				};
+			}
+			if (reqBody.url.includes("fetchAvailableModels")) {
+				return {
+					ok: true,
+					json: async () => ({
+						status_code: 200,
+						body: JSON.stringify({ models: {} }),
+					}),
+				};
+			}
+		}
+		return originalFetch(url, opts);
+	};
+
+	try {
+		const result = await antigravityAdapter.fetch("http://mock-base", "mock-key", {
+			id: "test",
+			name: "test",
+			auth_index: "mock-auth",
+			project_id: "test-proj",
+		});
+		console.assert(
+			queriedUrls.includes("https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"),
+			"fallback: attempted daily first",
+		);
+		console.assert(
+			queriedUrls.includes("https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary"),
+			"fallback: fell back to sandbox when daily failed",
+		);
+		console.assert(
+			!queriedUrls.includes("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"),
+			"fallback: did not query production when sandbox succeeded",
+		);
+		console.assert(
+			queriedUrls.includes("https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels"),
+			"fallback: queried sandbox fetchAvailableModels matching active host",
+		);
+		const weeklyWin = result.find((w) => w.label === "Gemini Models · weekly");
+		console.assert(weeklyWin?.remainingPct === 95, "retained sandbox 95% weekly quota");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+}
+
+// Fallback to production when daily and sandbox both fail
+{
+	const originalFetch = globalThis.fetch;
+	const queriedUrls = [];
+	globalThis.fetch = async (url, opts) => {
+		if (String(url).endsWith("/v0/management/api-call")) {
+			const reqBody = JSON.parse(opts.body);
+			queriedUrls.push(reqBody.url);
+			// Daily and sandbox fail, production succeeds
+			if (reqBody.url.includes("daily-cloudcode-pa")) {
+				return {
+					ok: true,
+					json: async () => ({ status_code: 500, body: "daily unavailable" }),
+				};
+			}
+			if (reqBody.url.includes("retrieveUserQuotaSummary")) {
+				return {
+					ok: true,
+					json: async () => ({
+						status_code: 200,
+						body: JSON.stringify({
+							groups: [
+								{
+									displayName: "Gemini Models",
+									buckets: [{ window: "weekly", remainingFraction: 0.91, resetTime: "2026-10-21T22:47:08Z" }],
+								},
+							],
+						}),
+					}),
+				};
+			}
+			if (reqBody.url.includes("fetchAvailableModels")) {
+				return {
+					ok: true,
+					json: async () => ({
+						status_code: 200,
+						body: JSON.stringify({ models: {} }),
+					}),
+				};
+			}
+		}
+		return originalFetch(url, opts);
+	};
+
+	try {
+		const result = await antigravityAdapter.fetch("http://mock-base", "mock-key", {
+			id: "test",
+			name: "test",
+			auth_index: "mock-auth",
+			project_id: "test-proj",
+		});
+		console.assert(
+			queriedUrls.includes("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"),
+			"fallback: fell back to production retrieveUserQuotaSummary when daily and sandbox failed",
+		);
+		console.assert(
+			queriedUrls.includes("https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"),
+			"fallback: queried production fetchAvailableModels matching active host",
+		);
+		const weeklyWin = result.find((w) => w.label === "Gemini Models · weekly");
+		console.assert(weeklyWin?.remainingPct === 91, "production weekly quota retrieved on fallback");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+}
 
 console.log("units OK:", summaryFromWins(wins, now));
 
