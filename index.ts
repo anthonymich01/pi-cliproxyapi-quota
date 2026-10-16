@@ -192,7 +192,7 @@ async function proxyCall(
 
 const BEARER = { Authorization: "Bearer $TOKEN$" };
 
-interface Adapter {
+export interface Adapter {
 	verified: boolean;
 	fetch: (base: string, key: string, cred: AuthFile) => Promise<Win[]>;
 }
@@ -231,9 +231,10 @@ const claudeAdapter: Adapter = {
 };
 
 // ---- antigravity / gemini code assist (VERIFIED): POST retrieveUserQuotaSummary ----
-// Prod returns both Gemini Models and Claude/GPT models (and Argon models if enabled),
-// while daily serves Antigravity traffic. We query daily endpoints ahead of production
-// and merge all model quota groups, keeping the most restrictive remaining fraction.
+// Matches upstream CPA panel fallback order: try daily ahead of daily-sandbox and production.
+// Once a host succeeds, subsequent hosts are not queried, preventing stale production quota
+// from clobbering live Antigravity quota. Per-model live 5h windows are fetched from the same
+// active host and merged with the summary quota.
 export const ANTIGRAVITY_HOSTS = [
 	"https://daily-cloudcode-pa.googleapis.com",
 	"https://daily-cloudcode-pa.sandbox.googleapis.com",
@@ -260,21 +261,41 @@ export function mergeWins(existingWins: Win[], newWins: Win[]): Win[] {
 			map.set(w.label, w);
 			order.push(w.label);
 		} else {
-			if (existing.remainingPct === null) {
-				map.set(w.label, w);
-			} else if (w.remainingPct !== null) {
-				if (w.remainingPct < existing.remainingPct) {
+			const tExist = existing.resetIso ? Date.parse(existing.resetIso) : NaN;
+			const tNew = w.resetIso ? Date.parse(w.resetIso) : NaN;
+			const hasExistTime = !Number.isNaN(tExist);
+			const hasNewTime = !Number.isNaN(tNew);
+
+			if (hasExistTime && hasNewTime) {
+				const diffMs = tNew - tExist;
+				if (diffMs > 60_000) {
+					// w has a distinctly newer reset date: active/fresher quota period replaces stale
 					map.set(w.label, w);
-				} else if (w.remainingPct === existing.remainingPct) {
-					if (!existing.resetIso && w.resetIso) {
+				} else if (diffMs < -60_000) {
+					// w has an older/stale reset date: do not let inferior/stale host clobber active quota
+					continue;
+				} else {
+					// Within the same reset window/cycle: keep the most restrictive remaining fraction
+					if (existing.remainingPct === null) {
 						map.set(w.label, w);
-					} else if (existing.resetIso && w.resetIso) {
-						const tExist = Date.parse(existing.resetIso);
-						const tNew = Date.parse(w.resetIso);
-						if (!Number.isNaN(tNew) && (Number.isNaN(tExist) || tNew < tExist)) {
-							map.set(w.label, w);
-						}
+					} else if (w.remainingPct !== null && w.remainingPct < existing.remainingPct) {
+						map.set(w.label, w);
 					}
+				}
+			} else if (!hasExistTime && hasNewTime) {
+				// w provides a valid reset date where existing had none
+				map.set(w.label, w);
+			} else if (hasExistTime && !hasNewTime) {
+				// existing already has a valid reset date; keep existing unless existing had null percentage
+				if (existing.remainingPct === null && w.remainingPct !== null) {
+					map.set(w.label, w);
+				}
+			} else {
+				// Neither has a valid reset date
+				if (existing.remainingPct === null) {
+					map.set(w.label, w);
+				} else if (w.remainingPct !== null && w.remainingPct < existing.remainingPct) {
+					map.set(w.label, w);
 				}
 			}
 		}
@@ -398,7 +419,7 @@ function parseQuotaSummary(body: string): Win[] {
 	return wins;
 }
 
-const antigravityAdapter: Adapter = {
+export const antigravityAdapter: Adapter = {
 	verified: true,
 	async fetch(base, key, cred) {
 		const authIndex = cred.auth_index as string;
@@ -406,23 +427,28 @@ const antigravityAdapter: Adapter = {
 		// project id comes from the auth-files listing; discover via loadCodeAssist if absent
 		let project = cred.project_id;
 		if (!project) {
-			try {
-				const body = await proxyCall(base, key, {
-					authIndex, method: "POST",
-					url: `${ANTIGRAVITY_HOSTS[0]}/v1internal:loadCodeAssist`,
-					header, body: JSON.stringify({ metadata: { ideType: "ANTIGRAVITY" } }),
-				});
-				const d = JSON.parse(body) as { cloudaicompanionProject?: unknown };
-				const cp = d.cloudaicompanionProject;
-				project = typeof cp === "string" ? cp : (cp as { id?: string } | undefined)?.id;
-			} catch {
-				// fall through to the legacy metadata call below
+			for (const host of ANTIGRAVITY_HOSTS) {
+				try {
+					const body = await proxyCall(base, key, {
+						authIndex,
+						method: "POST",
+						url: `${host}/v1internal:loadCodeAssist`,
+						header,
+						body: JSON.stringify({ metadata: { ideType: "ANTIGRAVITY" } }),
+					});
+					const d = JSON.parse(body) as { cloudaicompanionProject?: unknown };
+					const cp = d.cloudaicompanionProject;
+					project = typeof cp === "string" ? cp : (cp as { id?: string } | undefined)?.id;
+					if (project) break;
+				} catch {
+					// fall through to the next candidate host
+				}
 			}
 		}
 		const payload = project ? { project } : { metadata: { ideType: "ANTIGRAVITY" } };
 		let mergedWins: Win[] = [];
 		let lastErr: unknown;
-		let successCount = 0;
+		let activeHost: string | null = null;
 
 		for (const host of ANTIGRAVITY_HOSTS) {
 			try {
@@ -433,15 +459,19 @@ const antigravityAdapter: Adapter = {
 					header,
 					body: JSON.stringify(payload),
 				});
-				const wins = parseQuotaSummary(body);
-				mergedWins = mergeWins(mergedWins, wins);
-				successCount++;
+				mergedWins = parseQuotaSummary(body);
+				activeHost = host;
+				break;
 			} catch (err) {
 				lastErr = err;
 			}
 		}
 
-		for (const host of ANTIGRAVITY_HOSTS) {
+		const modelsHosts = activeHost
+			? [activeHost, ...ANTIGRAVITY_HOSTS.filter((h) => h !== activeHost)]
+			: ANTIGRAVITY_HOSTS;
+
+		for (const host of modelsHosts) {
 			try {
 				const body = await proxyCall(base, key, {
 					authIndex,
@@ -452,13 +482,13 @@ const antigravityAdapter: Adapter = {
 				});
 				const wins = parseModelsQuota(body);
 				mergedWins = mergeWins(mergedWins, wins);
-				successCount++;
+				break;
 			} catch (err) {
 				lastErr = err;
 			}
 		}
 
-		if (successCount === 0) {
+		if (!activeHost && mergedWins.length === 0) {
 			throw lastErr ?? new Error("Failed to retrieve Antigravity quota");
 		}
 		return mergedWins;

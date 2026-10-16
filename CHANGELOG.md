@@ -2,6 +2,13 @@
 
 All notable changes to `pi-cliproxyapi-quota` will be documented in this file.
 
+## [0.3.7] - 2026-10-17
+
+### Fixed
+- Fixed Antigravity weekly quota displaying stale production numbers (91% instead of live 97%): stop querying subsequent hosts once a host succeeds, matching upstream CPA panel fallback order (`daily-cloudcode-pa.googleapis.com` -> `daily-cloudcode-pa.sandbox.googleapis.com` -> `cloudcode-pa.googleapis.com`).
+- Query `fetchAvailableModels` on the same active host that succeeded for `retrieveUserQuotaSummary`, ensuring per-model live 5h windows are fetched from the same active host environment and merged with `retrieveUserQuotaSummary`.
+- Hardened `mergeWins` so stale reset dates and lower percentages from inferior hosts cannot clobber an active host's live quota, and fresher reset dates cleanly overwrite stale cycles.
+
 ## [0.3.6] - 2026-10-17
 
 ### Fixed
