@@ -176,14 +176,41 @@ function firstIso(...vals: unknown[]): string | null {
 	return null;
 }
 
+export async function refreshCredential(base: string, key: string, name: string): Promise<boolean> {
+	try {
+		const res = await fetch(`${base}/v0/management/auth-files/refresh?name=${encodeURIComponent(name)}`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+			body: JSON.stringify({ name }),
+			signal: AbortSignal.timeout(15_000),
+		});
+		if (!res.ok) return false;
+		const data = (await res.json()) as { ok?: boolean };
+		return data.ok === true;
+	} catch {
+		return false;
+	}
+}
+
 // Run one upstream request through the management api-call proxy; returns raw body text.
 // The proxy substitutes $TOKEN$ in headers with the stored OAuth bearer for authIndex.
-async function proxyCall(
+// If the upstream returns HTTP 401 and cred is provided, attempts token refresh via CLIProxyAPI and retries once.
+export async function proxyCall(
 	base: string,
 	key: string,
 	req: { authIndex: string; method: string; url: string; header?: Record<string, string>; body?: string },
+	cred?: AuthFile | string,
 ): Promise<string> {
-	const out = await mgmtApiCall(base, key, req);
+	let out = await mgmtApiCall(base, key, req);
+	if (out.status_code === 401 && cred) {
+		const name = typeof cred === "string" ? cred : cred.name || cred.id;
+		if (name) {
+			const refreshed = await refreshCredential(base, key, name);
+			if (refreshed) {
+				out = await mgmtApiCall(base, key, req);
+			}
+		}
+	}
 	if (out.status_code < 200 || out.status_code >= 300) {
 		throw new Error(`upstream HTTP ${out.status_code}`);
 	}
@@ -211,12 +238,17 @@ const claudeAdapter: Adapter = {
 	verified: true,
 	async fetch(base, key, cred) {
 		const authIndex = cred.auth_index as string;
-		const body = await proxyCall(base, key, {
-			authIndex,
-			method: "GET",
-			url: "https://api.anthropic.com/api/oauth/usage",
-			header: { ...BEARER, "Content-Type": "application/json", "anthropic-beta": "oauth-2025-04-20" },
-		});
+		const body = await proxyCall(
+			base,
+			key,
+			{
+				authIndex,
+				method: "GET",
+				url: "https://api.anthropic.com/api/oauth/usage",
+				header: { ...BEARER, "Content-Type": "application/json", "anthropic-beta": "oauth-2025-04-20" },
+			},
+			cred,
+		);
 		const usage = JSON.parse(body) as Record<string, { utilization?: unknown; resets_at?: unknown } | null>;
 		const wins: Win[] = [];
 		for (const [k, label] of CLAUDE_WINDOWS) {
@@ -429,13 +461,18 @@ export const antigravityAdapter: Adapter = {
 		if (!project) {
 			for (const host of ANTIGRAVITY_HOSTS) {
 				try {
-					const body = await proxyCall(base, key, {
-						authIndex,
-						method: "POST",
-						url: `${host}/v1internal:loadCodeAssist`,
-						header,
-						body: JSON.stringify({ metadata: { ideType: "ANTIGRAVITY" } }),
-					});
+					const body = await proxyCall(
+						base,
+						key,
+						{
+							authIndex,
+							method: "POST",
+							url: `${host}/v1internal:loadCodeAssist`,
+							header,
+							body: JSON.stringify({ metadata: { ideType: "ANTIGRAVITY" } }),
+						},
+						cred,
+					);
 					const d = JSON.parse(body) as { cloudaicompanionProject?: unknown };
 					const cp = d.cloudaicompanionProject;
 					project = typeof cp === "string" ? cp : (cp as { id?: string } | undefined)?.id;
@@ -452,13 +489,18 @@ export const antigravityAdapter: Adapter = {
 
 		for (const host of ANTIGRAVITY_HOSTS) {
 			try {
-				const body = await proxyCall(base, key, {
-					authIndex,
-					method: "POST",
-					url: `${host}/v1internal:retrieveUserQuotaSummary`,
-					header,
-					body: JSON.stringify(payload),
-				});
+				const body = await proxyCall(
+					base,
+					key,
+					{
+						authIndex,
+						method: "POST",
+						url: `${host}/v1internal:retrieveUserQuotaSummary`,
+						header,
+						body: JSON.stringify(payload),
+					},
+					cred,
+				);
 				mergedWins = parseQuotaSummary(body);
 				activeHost = host;
 				break;
@@ -473,13 +515,18 @@ export const antigravityAdapter: Adapter = {
 
 		for (const host of modelsHosts) {
 			try {
-				const body = await proxyCall(base, key, {
-					authIndex,
-					method: "POST",
-					url: `${host}/v1internal:fetchAvailableModels`,
-					header,
-					body: JSON.stringify(payload),
-				});
+				const body = await proxyCall(
+					base,
+					key,
+					{
+						authIndex,
+						method: "POST",
+						url: `${host}/v1internal:fetchAvailableModels`,
+						header,
+						body: JSON.stringify(payload),
+					},
+					cred,
+				);
 				const wins = parseModelsQuota(body);
 				mergedWins = mergeWins(mergedWins, wins);
 				break;
@@ -502,9 +549,17 @@ const kimiAdapter: Adapter = {
 	verified: true,
 	async fetch(base, key, cred) {
 		const authIndex = cred.auth_index as string;
-		const body = await proxyCall(base, key, {
-			authIndex, method: "GET", url: "https://api.kimi.com/coding/v1/usages", header: { ...BEARER },
-		});
+		const body = await proxyCall(
+			base,
+			key,
+			{
+				authIndex,
+				method: "GET",
+				url: "https://api.kimi.com/coding/v1/usages",
+				header: { ...BEARER },
+			},
+			cred,
+		);
 		const data = JSON.parse(body) as {
 			usage?: Record<string, unknown>;
 			limits?: Array<{ window?: { duration?: unknown; timeUnit?: unknown }; detail?: Record<string, unknown> }>;
@@ -535,16 +590,21 @@ const codexAdapter: Adapter = {
 	verified: false,
 	async fetch(base, key, cred) {
 		const authIndex = cred.auth_index as string;
-		const body = await proxyCall(base, key, {
-			authIndex,
-			method: "GET",
-			url: "https://chatgpt.com/backend-api/wham/usage",
-			header: {
-				...BEARER,
-				"Content-Type": "application/json",
-				"User-Agent": "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
+		const body = await proxyCall(
+			base,
+			key,
+			{
+				authIndex,
+				method: "GET",
+				url: "https://chatgpt.com/backend-api/wham/usage",
+				header: {
+					...BEARER,
+					"Content-Type": "application/json",
+					"User-Agent": "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
+				},
 			},
-		});
+			cred,
+		);
 		const data = JSON.parse(body) as Record<string, unknown>;
 		const wins: Win[] = [];
 		const rl = (data.rate_limits ?? data) as Record<string, unknown>;
@@ -572,9 +632,17 @@ const xaiAdapter: Adapter = {
 	verified: false,
 	async fetch(base, key, cred) {
 		const authIndex = cred.auth_index as string;
-		const body = await proxyCall(base, key, {
-			authIndex, method: "GET", url: "https://api.x.ai/v1/me", header: { ...BEARER, accept: "application/json" },
-		});
+		const body = await proxyCall(
+			base,
+			key,
+			{
+				authIndex,
+				method: "GET",
+				url: "https://api.x.ai/v1/me",
+				header: { ...BEARER, accept: "application/json" },
+			},
+			cred,
+		);
 		const data = JSON.parse(body) as Record<string, unknown>;
 		const p = toNum(data.usagePercent ?? data.usage_percent ?? data.creditUsagePercent);
 		return p === null ? [] : [{ label: "usage", remainingPct: Math.max(0, 100 - p), resetIso: null }];
@@ -1046,6 +1114,20 @@ function isPrimaryUiSession(ctx: ExtensionContext): boolean {
 }
 
 export const REFRESH_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
+export const JITTER_TOLERANCE_MS = 5_000; // 5-second timer-jitter cushion to avoid dropped intervals
+
+/** Check if background quota refresh should be throttled. Exported for test-quota.mjs. */
+export function isQuotaThrottled(
+	now: number,
+	lastFetchTime: number,
+	currentModelKey: string,
+	lastModelKey: string,
+	silent = true,
+): boolean {
+	if (!silent) return false;
+	if (currentModelKey !== lastModelKey) return false;
+	return now - lastFetchTime < REFRESH_INTERVAL_MS - JITTER_TOLERANCE_MS;
+}
 
 export default function (pi: ExtensionAPI): void {
 	// ----- /quota -----
@@ -1073,7 +1155,7 @@ export default function (pi: ExtensionAPI): void {
 		if (isFetching && silent) return;
 		const currentModelKey = `${ctx.model?.provider ?? ""}:${ctx.model?.id ?? ""}`;
 		const now = Date.now();
-		if (silent && currentModelKey === lastModelKey && now - lastFetchTime < REFRESH_INTERVAL_MS) {
+		if (isQuotaThrottled(now, lastFetchTime, currentModelKey, lastModelKey, silent)) {
 			return;
 		}
 		isFetching = true;
@@ -1131,6 +1213,18 @@ export default function (pi: ExtensionAPI): void {
 	// Switching models switches the footer to that provider's quota immediately
 	pi.on("model_select", (_e, ctx) => {
 		startRefreshInterval(ctx);
+		void runQuota(ctx, true);
+	});
+
+	// Completed assistant turns refresh footer quota if throttle threshold has passed
+	pi.on("turn_end", (_e, ctx) => {
+		currentCtx = ctx;
+		void runQuota(ctx, true);
+	});
+
+	// Completed agent runs refresh footer quota if throttle threshold has passed
+	pi.on("agent_end", (_e, ctx) => {
+		currentCtx = ctx;
 		void runQuota(ctx, true);
 	});
 

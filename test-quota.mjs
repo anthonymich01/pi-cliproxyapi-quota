@@ -22,6 +22,10 @@ import extension, {
 	ANSI_ORANGE,
 	ANSI_RED,
 	REFRESH_INTERVAL_MS,
+	JITTER_TOLERANCE_MS,
+	isQuotaThrottled,
+	refreshCredential,
+	proxyCall,
 } from "./index.ts";
 
 // formatReset unit checks
@@ -347,8 +351,44 @@ console.assert(
 	`render contains active reset countdown: ${renderedUpdated}`,
 );
 
-// Extension registration and refresh interval checks
+// Extension registration, throttle condition, and timer jitter checks
 console.assert(REFRESH_INTERVAL_MS === 3 * 60 * 1000, "REFRESH_INTERVAL_MS is 3 minutes");
+console.assert(JITTER_TOLERANCE_MS === 5000, "JITTER_TOLERANCE_MS is 5 seconds");
+
+// isQuotaThrottled unit checks
+const tBase = 1_000_000;
+// 1. Silent refresh with same model within throttle window (< 175s) is throttled
+console.assert(
+	isQuotaThrottled(tBase + 30_000, tBase, "antigravity:gemini-pro", "antigravity:gemini-pro", true) === true,
+	"isQuotaThrottled: 30s after fetch is throttled",
+);
+console.assert(
+	isQuotaThrottled(tBase + 174_000, tBase, "antigravity:gemini-pro", "antigravity:gemini-pro", true) === true,
+	"isQuotaThrottled: 174s after fetch is throttled",
+);
+// 2. Timer jitter tolerance: 500ms before 3 minutes (179.5s) must NOT be throttled
+console.assert(
+	isQuotaThrottled(tBase + REFRESH_INTERVAL_MS - 500, tBase, "antigravity:gemini-pro", "antigravity:gemini-pro", true) === false,
+	"isQuotaThrottled: 500ms before 3min mark is NOT throttled (jitter tolerance)",
+);
+console.assert(
+	isQuotaThrottled(tBase + REFRESH_INTERVAL_MS - JITTER_TOLERANCE_MS, tBase, "antigravity:gemini-pro", "antigravity:gemini-pro", true) === false,
+	"isQuotaThrottled: exactly at throttle threshold is NOT throttled",
+);
+console.assert(
+	isQuotaThrottled(tBase + REFRESH_INTERVAL_MS + 1000, tBase, "antigravity:gemini-pro", "antigravity:gemini-pro", true) === false,
+	"isQuotaThrottled: after 3 minutes is NOT throttled",
+);
+// 3. Manual command (silent=false) is NEVER throttled
+console.assert(
+	isQuotaThrottled(tBase + 10_000, tBase, "antigravity:gemini-pro", "antigravity:gemini-pro", false) === false,
+	"isQuotaThrottled: manual silent=false is not throttled",
+);
+// 4. Model switch (currentModelKey !== lastModelKey) is NEVER throttled
+console.assert(
+	isQuotaThrottled(tBase + 10_000, tBase, "claude:sonnet", "antigravity:gemini-pro", true) === false,
+	"isQuotaThrottled: model switch is not throttled",
+);
 
 const registeredEvents = {};
 const registeredCommands = {};
@@ -366,12 +406,101 @@ const mockPi = {
 };
 extension(mockPi);
 
-console.assert(!("turn_end" in registeredEvents), "turn_end must not be registered (prevents unthrottled tool call polling)");
+console.assert("turn_end" in registeredEvents, "turn_end must be registered (throttled turn updates)");
+console.assert("agent_end" in registeredEvents, "agent_end must be registered (throttled agent run updates)");
 console.assert("session_start" in registeredEvents, "session_start must be registered");
 console.assert("model_select" in registeredEvents, "model_select must be registered");
 console.assert("session_shutdown" in registeredEvents, "session_shutdown must be registered");
 console.assert("ctrl+shift+q" in registeredShortcuts, "ctrl+shift+q shortcut registered");
 console.assert("quota" in registeredCommands, "quota command registered");
+
+// Token refresh on HTTP 401 unit checks
+{
+	const originalFetch = globalThis.fetch;
+	let refreshCalled = false;
+	let apiCalls = 0;
+	globalThis.fetch = async (url, opts) => {
+		const sUrl = String(url);
+		if (sUrl.includes("/v0/management/auth-files/refresh")) {
+			refreshCalled = true;
+			const body = JSON.parse(opts.body);
+			console.assert(body.name === "test-cred.json", "refreshCredential passed correct name in body");
+			return {
+				ok: true,
+				json: async () => ({ ok: true }),
+			};
+		}
+		if (sUrl.includes("/v0/management/api-call")) {
+			apiCalls++;
+			if (apiCalls === 1) {
+				// First call returns 401 Unauthorized
+				return {
+					ok: true,
+					json: async () => ({ status_code: 401, body: "token expired" }),
+				};
+			}
+			// Second call after refresh returns 200 OK
+			return {
+				ok: true,
+				json: async () => ({ status_code: 200, body: JSON.stringify({ success: true }) }),
+			};
+		}
+		return originalFetch(url, opts);
+	};
+
+	try {
+		const resBody = await proxyCall(
+			"http://mock-base",
+			"mock-key",
+			{ authIndex: "test-auth", method: "GET", url: "https://upstream.test" },
+			{ id: "test-cred.json", name: "test-cred.json" },
+		);
+		console.assert(refreshCalled === true, "proxyCall triggered refreshCredential on 401");
+		console.assert(apiCalls === 2, "proxyCall retried api-call after successful refresh");
+		console.assert(JSON.parse(resBody).success === true, "proxyCall returned body from retried call");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+}
+
+// Token refresh failure handling
+{
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = async (url, opts) => {
+		const sUrl = String(url);
+		if (sUrl.includes("/v0/management/auth-files/refresh")) {
+			return {
+				ok: false,
+				status: 500,
+			};
+		}
+		if (sUrl.includes("/v0/management/api-call")) {
+			return {
+				ok: true,
+				json: async () => ({ status_code: 401, body: "token expired" }),
+			};
+		}
+		return originalFetch(url, opts);
+	};
+
+	try {
+		let caught = false;
+		try {
+			await proxyCall(
+				"http://mock-base",
+				"mock-key",
+				{ authIndex: "test-auth", method: "GET", url: "https://upstream.test" },
+				{ id: "test-cred.json", name: "test-cred.json" },
+			);
+		} catch (err) {
+			caught = true;
+			console.assert(err.message.includes("upstream HTTP 401"), "throws 401 when refresh fails");
+		}
+		console.assert(caught === true, "proxyCall throws when token refresh fails");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+}
 
 // CPA panel fallback order mock tests for antigravityAdapter
 {
