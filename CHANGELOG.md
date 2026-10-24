@@ -2,6 +2,13 @@
 
 All notable changes to `pi-cliproxyapi-quota` will be documented in this file.
 
+## [0.3.8] - 2026-10-24
+
+### Fixed
+- Fixed quota failing to update due to timer jitter: added a 5-second `JITTER_TOLERANCE_MS` buffer to throttle calculations (`isQuotaThrottled`), ensuring periodic background refreshes on the 3-minute `setInterval` are not dropped when firing fractions of a second early.
+- Re-enabled throttled lifecycle event listeners (`turn_end` and `agent_end`): completed agent runs and turns now reliably refresh footer quota if the throttle threshold has passed, keeping quota accurate after assistant responses without polling spam during agentic tool use.
+- Added automatic OAuth token refresh on upstream HTTP 401 via CLIProxyAPI's `POST /v0/management/auth-files/refresh`, retrying the request seamlessly so quota fetches do not fail silently when access tokens expire.
+
 ## [0.3.7] - 2026-10-17
 
 ### Fixed
